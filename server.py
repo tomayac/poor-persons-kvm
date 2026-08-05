@@ -288,6 +288,50 @@ HTML_PAGE = """
         let mousePointerId = null;
         const activePointers = new Map(); // pointerId -> {x, y} in client coords
 
+        // A touch only becomes a "press" (mousedown sent to the Mac) once it
+        // moves past this distance — otherwise every tiny finger tremor during
+        // a tap would register as a click-and-drag and select whatever text
+        // is under the path. Below the threshold we buffer the down position
+        // and only resolve it as a click (down+up together) or a drag on release/commit.
+        const DRAG_THRESHOLD = 8;
+        let mouseDownSent = false;
+        let mouseDownPos = null; // offset coords of the buffered pointerdown
+
+        // Raw pointermove fires far faster (60-120/sec on a touchscreen) than
+        // it's useful to relay over the network — each send is a real
+        // synchronous OS call on the Mac side, so an unthrottled flood queues
+        // up and the remote cursor lags further behind with every event.
+        // Coalesce to the latest position and send at a bounded rate instead.
+        const MOUSEMOVE_INTERVAL = 60;
+        let pendingMove = null;
+        let moveThrottleTimer = null;
+
+        function sendMouseMoveThrottled(x, y) {
+            pendingMove = { x, y };
+            if (moveThrottleTimer) return;
+            moveThrottleTimer = setTimeout(() => {
+                moveThrottleTimer = null;
+                if (pendingMove) {
+                    const { x, y } = pendingMove;
+                    pendingMove = null;
+                    post('/input/mousemove', { x, y });
+                }
+            }, MOUSEMOVE_INTERVAL);
+        }
+
+        function flushMouseMove() {
+            if (moveThrottleTimer) {
+                clearTimeout(moveThrottleTimer);
+                moveThrottleTimer = null;
+            }
+            if (pendingMove) {
+                const { x, y } = pendingMove;
+                pendingMove = null;
+                return post('/input/mousemove', { x, y });
+            }
+            return Promise.resolve();
+        }
+
         let scale = 1, panX = 0, panY = 0;
         let pinchStart = null; // { distance, midpoint, scale, pan, anchor }
 
@@ -391,16 +435,17 @@ HTML_PAGE = """
             if (activePointers.size === 1) {
                 gestureMode = 'mouse';
                 mousePointerId = e.pointerId;
-                const off = offsetPoint(e.clientX, e.clientY);
-                const { x, y } = toMacCoords(off.x, off.y);
-                updateCursorDot(off.x, off.y);
+                mouseDownSent = false;
+                mouseDownPos = offsetPoint(e.clientX, e.clientY);
+                updateCursorDot(mouseDownPos.x, mouseDownPos.y);
                 cursorDot.classList.add('down');
-                post('/input/mousedown', { x, y, button: rightClickMode ? 'right' : 'left' });
+                // Buffered: no mousedown sent to the Mac yet — see pointermove.
             } else if (activePointers.size === 2) {
-                if (gestureMode === 'mouse') {
-                    // Cancel the in-progress click/drag before switching to pinch.
-                    post('/input/mouseup', { button: rightClickMode ? 'right' : 'left' });
+                if (gestureMode === 'mouse' && mouseDownSent) {
+                    // Cancel the in-progress drag before switching to pinch.
+                    flushMouseMove().then(() => post('/input/mouseup', { button: rightClickMode ? 'right' : 'left' }));
                 }
+                mouseDownSent = false;
                 gestureMode = 'pinch';
                 startPinch();
             }
@@ -412,9 +457,18 @@ HTML_PAGE = """
 
             if (gestureMode === 'mouse' && e.pointerId === mousePointerId) {
                 const off = offsetPoint(e.clientX, e.clientY);
-                const { x, y } = toMacCoords(off.x, off.y);
                 updateCursorDot(off.x, off.y);
-                post('/input/mousemove', { x, y });
+
+                if (!mouseDownSent) {
+                    if (dist(off, mouseDownPos) < DRAG_THRESHOLD) return;
+                    // Movement past the tap tolerance — commit to a drag: press
+                    // down at the original touch point first, then move to here.
+                    const down = toMacCoords(mouseDownPos.x, mouseDownPos.y);
+                    post('/input/mousedown', { x: down.x, y: down.y, button: rightClickMode ? 'right' : 'left' });
+                    mouseDownSent = true;
+                }
+                const { x, y } = toMacCoords(off.x, off.y);
+                sendMouseMoveThrottled(x, y);
             } else if (gestureMode === 'pinch' && activePointers.size === 2) {
                 updatePinch();
             }
@@ -426,8 +480,21 @@ HTML_PAGE = """
 
             if (wasMouse) {
                 cursorDot.classList.remove('down');
-                post('/input/mouseup', { button: rightClickMode ? 'right' : 'left' })
-                    .then(() => setTimeout(refreshScreen, 200));
+                const button = rightClickMode ? 'right' : 'left';
+                if (mouseDownSent) {
+                    flushMouseMove()
+                        .then(() => post('/input/mouseup', { button }))
+                        .then(() => setTimeout(refreshScreen, 200));
+                } else {
+                    // Never moved past the tap threshold — resolve as a plain
+                    // click (down+up together) at the touch point.
+                    const { x, y } = toMacCoords(mouseDownPos.x, mouseDownPos.y);
+                    post('/input/mousedown', { x, y, button })
+                        .then(() => post('/input/mouseup', { button }))
+                        .then(() => setTimeout(refreshScreen, 200));
+                }
+                mouseDownSent = false;
+                mouseDownPos = null;
             }
             if (activePointers.size < 2) {
                 pinchStart = null;
@@ -524,4 +591,7 @@ if __name__ == "__main__":
     print(f"Open on a device on the SAME WiFi network:")
     print(f"  http://{ip}:5959/?token={AUTH_TOKEN}")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5959)
+    # threaded=True matters here: without it, Werkzeug's dev server handles
+    # one request at a time, so a burst of input POSTs queues up behind the
+    # periodic /screenshot polls (and vice versa), adding real, growing lag.
+    app.run(host="0.0.0.0", port=5959, threaded=True)
