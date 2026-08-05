@@ -213,12 +213,13 @@ HTML_PAGE = """
         #zoomLayer { transform-origin: 0 0; will-change: transform; }
         #screen { width: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
         #cursorDot {
-            position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
-            border: 2px solid #fff; border-radius: 50%; background: rgba(255,40,40,0.35);
-            box-shadow: 0 0 4px rgba(0,0,0,0.7); pointer-events: none; opacity: 0; z-index: 10;
+            position: absolute; top: 0; left: 0; width: 24px; height: 34px;
+            pointer-events: none; opacity: 0; z-index: 10;
+            filter: drop-shadow(0 1px 2px rgba(0,0,0,0.8));
         }
-        #cursorDot.right { background: rgba(40,120,255,0.35); }
-        #cursorDot.down { transform: scale(0.8); }
+        #cursorDot path { fill: #fff; stroke: #000; stroke-width: 1.2; stroke-linejoin: round; }
+        #cursorDot.right path { fill: #6cb2ff; }
+        #cursorDot.down { transform: scale(0.9); }
         body.compact #topbar {
             position: fixed; top: 6px; right: 6px; left: auto; background: rgba(0,0,0,0.55);
             padding: 4px 6px; border-radius: 8px; z-index: 20;
@@ -246,7 +247,11 @@ HTML_PAGE = """
         <div id="zoomLayer">
             <img id="screen" src="/screenshot?token=TOKEN_PLACEHOLDER">
         </div>
-        <div id="cursorDot"></div>
+        <div id="cursorDot">
+            <svg width="24" height="34" viewBox="0 0 20 28">
+                <path d="M0,0 L0,20 L5,15.5 L8.5,23 L11.5,21.5 L8,14 L14,14 Z"/>
+            </svg>
+        </div>
     </div>
     <div id="textRow">
         <input id="textInput" type="text" placeholder="Type here, then Send">
@@ -300,6 +305,15 @@ HTML_PAGE = """
             next.src = '/screenshot?token=' + TOKEN + '&t=' + Date.now();
         }
 
+        // Offset the reported pointer position up-left of the actual touch so
+        // the finger doesn't cover the cursor. Applied identically to the
+        // visual cursor and the coordinates sent to the Mac, so the arrow tip
+        // always shows exactly where the click will land.
+        const CURSOR_OFFSET = { x: -22, y: -30 };
+        function offsetPoint(clientX, clientY) {
+            return { x: clientX + CURSOR_OFFSET.x, y: clientY + CURSOR_OFFSET.y };
+        }
+
         function toMacCoords(clientX, clientY) {
             // img.getBoundingClientRect() already reflects the current zoom/pan
             // transform, so this stays correct at any zoom level.
@@ -312,10 +326,12 @@ HTML_PAGE = """
             };
         }
 
-        function updateCursorDot(clientX, clientY) {
+        function updateCursorDot(offsetClientX, offsetClientY) {
+            // cursorDot's SVG arrow has its tip at local (0,0), so positioning
+            // top/left directly (no centering math) puts the tip exactly here.
             const rect = screenWrap.getBoundingClientRect();
-            cursorDot.style.left = (clientX - rect.left) + 'px';
-            cursorDot.style.top = (clientY - rect.top) + 'px';
+            cursorDot.style.left = (offsetClientX - rect.left) + 'px';
+            cursorDot.style.top = (offsetClientY - rect.top) + 'px';
             cursorDot.style.opacity = '1';
             cursorDot.classList.toggle('right', rightClickMode);
         }
@@ -375,8 +391,10 @@ HTML_PAGE = """
             if (activePointers.size === 1) {
                 gestureMode = 'mouse';
                 mousePointerId = e.pointerId;
-                const { x, y } = toMacCoords(e.clientX, e.clientY);
-                updateCursorDot(e.clientX, e.clientY);
+                const off = offsetPoint(e.clientX, e.clientY);
+                const { x, y } = toMacCoords(off.x, off.y);
+                updateCursorDot(off.x, off.y);
+                cursorDot.classList.add('down');
                 post('/input/mousedown', { x, y, button: rightClickMode ? 'right' : 'left' });
             } else if (activePointers.size === 2) {
                 if (gestureMode === 'mouse') {
@@ -393,8 +411,9 @@ HTML_PAGE = """
             activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
             if (gestureMode === 'mouse' && e.pointerId === mousePointerId) {
-                const { x, y } = toMacCoords(e.clientX, e.clientY);
-                updateCursorDot(e.clientX, e.clientY);
+                const off = offsetPoint(e.clientX, e.clientY);
+                const { x, y } = toMacCoords(off.x, off.y);
+                updateCursorDot(off.x, off.y);
                 post('/input/mousemove', { x, y });
             } else if (gestureMode === 'pinch' && activePointers.size === 2) {
                 updatePinch();
@@ -406,6 +425,7 @@ HTML_PAGE = """
             activePointers.delete(e.pointerId);
 
             if (wasMouse) {
+                cursorDot.classList.remove('down');
                 post('/input/mouseup', { button: rightClickMode ? 'right' : 'left' })
                     .then(() => setTimeout(refreshScreen, 200));
             }
