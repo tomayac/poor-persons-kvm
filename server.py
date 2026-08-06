@@ -842,10 +842,13 @@ HTML_PAGE = """
            already reserves this space at the page's true bottom edge. */
         body.compact #screenWrap { padding-bottom: env(safe-area-inset-bottom, 0px); }
         #controls {
-            display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111;
-            /* Same reasoning as #topbar's padding-top above: scoped to the
-               actual last element in normal flow, not body. */
-            padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+            /* No block padding — see #clickRow below for why. Its own
+               bottom safe-area inset becomes margin instead of padding for
+               the same reason (and margins don't collapse between flex
+               siblings, so this is exactly equivalent to the old
+               padding-bottom). */
+            display: flex; flex-wrap: wrap; gap: 6px; padding-inline: 8px; background: #111;
+            margin-block-end: max(8px, env(safe-area-inset-bottom, 8px));
             /* Same width capping as #topbar — full width up to a real
                device's width, centered beyond that. Its buttons grow to
                fill it, same as the top bar's (below). */
@@ -876,20 +879,28 @@ HTML_PAGE = """
         .arrow-left { grid-area: left; }
         .arrow-down { grid-area: down; }
         .arrow-right { grid-area: right; }
-        #clickRow { display: flex; gap: 8px; padding: 8px; background: #111; }
+        #clickRow {
+            /* No padding at the block start/content sides — it sits flush
+               against the video above it; margin-block-end is the only
+               vertical space it adds, and only after itself. Halves the old
+               "padding-bottom of this row + padding-top of the next" gap
+               down to a single 8px, and keeps the amount of space between
+               rows visually the same as the gap between buttons within a
+               row. */
+            display: flex; gap: 8px; padding-inline: 8px; margin-block-end: 8px; background: #111;
+        }
         #clickRow button {
             flex: 1; padding: 16px; font-size: 15px; font-weight: 600;
             touch-action: none; user-select: none; -webkit-user-select: none;
         }
         #clickRow button.held { background: #2a63c9; border-color: #2a63c9; }
         #textRow {
-            /* Same outer padding as #clickRow/#controls — this row's extra
-               height comes entirely from #textInput/#sendText growing
-               taller (align-items' default "stretch" fills whatever height
-               this row ends up with), not from extra padding on the row
-               itself, so the space between bars reads the same as the gap
-               between buttons within a bar. */
-            display: flex; gap: 6px; padding: 8px; background: #111;
+            /* Same reasoning as #clickRow above — no block padding, just
+               margin-block-end — plus this row's extra height goes entirely
+               into #textInput/#sendText growing taller (align-items'
+               default "stretch" fills whatever height this row ends up
+               with). */
+            display: flex; gap: 6px; padding-inline: 8px; margin-block-end: 8px; background: #111;
             /* The one row that grows: it soaks up whatever vertical space is
                left over once the video and every other (fixed-size) row have
                taken exactly what they need — see #screenCenterer above.
@@ -902,7 +913,10 @@ HTML_PAGE = """
             flex: 1 0 auto; max-height: 140px;
         }
         #textInput, #sendText { font-size: 16px; }
-        #textInput { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #555; background: #222; color: #eee; }
+        #textInput {
+            flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #555;
+            background: #222; color: #eee; font-family: inherit; resize: none;
+        }
         #sendText { padding: 12px 20px; }
     </style>
 </head>
@@ -957,7 +971,7 @@ HTML_PAGE = """
         <button id="doubleClickBtn">Double Click</button>
     </div>
     <div id="textRow">
-        <input id="textInput" type="text" placeholder="Type here, then Send">
+        <textarea id="textInput" placeholder="Type here, then Send"></textarea>
         <button id="sendText">Send</button>
     </div>
     <div id="controls">
