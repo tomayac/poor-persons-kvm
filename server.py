@@ -34,9 +34,17 @@ sock = Sock(app)
 # on every launch.
 AUTH_TOKEN = os.environ.get("KVM_TOKEN") or secrets.token_urlsafe(24)
 
-# How often the /ws connection pushes a fresh frame, in seconds. Lower is
-# smoother but costs more bandwidth/CPU per frame capture (~100-300ms each).
-WS_FRAME_INTERVAL = float(os.environ.get("KVM_WS_INTERVAL", "0.35"))
+# Streaming rate over /ws is self-adjusting by default ("optimal" — see
+# ws_handler): the server never sends a frame until the client has acked the
+# previous one, so the rate naturally settles to whatever the connection can
+# actually sustain instead of guessing a fixed interval. "Slow" mode adds a
+# deliberate floor on top of that, for when you'd rather conserve bandwidth
+# than get the fastest possible updates.
+WS_SLOW_INTERVAL = float(os.environ.get("KVM_WS_SLOW_INTERVAL", "2.0"))
+# Safety cap: if a frame_ack never arrives (e.g. one got dropped), don't
+# stall the sender forever — proceed anyway after this long. Actual dead
+# connections are caught by ws.send() itself failing, not this.
+MAX_FRAME_ACK_WAIT = 5.0
 
 # cmd/alt are Mac-friendly aliases for pyautogui's actual key names.
 KEY_ALIASES = {
@@ -202,10 +210,21 @@ def health():
         return jsonify({"screenshot_ok": False, "error": str(e)}), 500
 
 
-def capture_frame_bytes():
-    """Capture one screenshot and encode it, shared by /screenshot and /ws."""
+def capture_frame_bytes(prefer_speed=False):
+    """Capture one screenshot and encode it, shared by /screenshot and /ws.
+
+    AVIF compresses much smaller than JPEG (good for bandwidth), but on this
+    machine encoding it costs ~500ms+ versus JPEG's ~15ms — measured
+    directly, not assumed — which single-handedly dominates per-frame
+    latency once capture (~1-2s) is added. "optimal" mode's whole point is
+    speed, so it uses JPEG; "slow" mode already isn't optimizing for
+    latency, so it keeps AVIF for the smaller payload.
+    """
     img = take_screenshot()
     buf = io.BytesIO()
+    if prefer_speed:
+        img.convert("RGB").save(buf, "JPEG", quality=70)
+        return buf.getvalue(), "image/jpeg"
     try:
         img.save(buf, "AVIF", quality=55)
         return buf.getvalue(), "image/avif"
@@ -221,7 +240,7 @@ def capture_frame_bytes():
 @app.route("/screenshot")
 def screenshot():
     try:
-        data, mimetype = capture_frame_bytes()
+        data, mimetype = capture_frame_bytes(prefer_speed=request.args.get("rate") == "optimal")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     return send_file(io.BytesIO(data), mimetype=mimetype)
@@ -346,28 +365,45 @@ def key_press():
 
 @sock.route("/ws")
 def ws_handler(ws):
-    """One WebSocket connection: pushes binary frames on a timer while
-    reading JSON input events off the same connection, replacing the
-    HTTP polling / POST round trips with a single persistent connection.
+    """One WebSocket connection: pushes binary frames while reading JSON
+    input events off the same connection, replacing the HTTP polling /
+    POST round trips with a single persistent connection.
+
+    Streaming rate ("?rate=optimal|slow") is closed-loop, not a fixed
+    interval: the sender never captures the next frame until the client
+    has acked the previous one (frame_ack messages, handled below), so the
+    rate self-adjusts to whatever the connection can actually sustain —
+    capped only by how long a capture itself takes (~100-300ms). This also
+    structurally prevents a slow connection from ever building up a
+    backlog of stale-by-the-time-they-arrive frames, rather than just
+    detecting that after the fact. "slow" adds a deliberate floor on top,
+    for when conserving bandwidth matters more than freshness.
 
     Also answers {"type": "ping", "t": ...} with a pong echoing t back
     unchanged, so the client can measure round-trip latency using only its
     own clock (see the matching comment in HTML_PAGE's checkStale()) — this
-    is how the client detects a connection that's backed up but still
-    trickling frames through, not just one that's gone fully silent.
+    is a separate, purely diagnostic signal from frame_ack: it measures
+    "is the pipe responsive right now" independent of capture cost, which
+    is what the staleness overlay needs and frame_ack pacing doesn't
+    directly tell you (frame_ack round trips include capture time too).
     """
+    rate_mode = request.args.get("rate", "optimal")
     stop = threading.Event()
+    ack_event = threading.Event()
     send_lock = threading.Lock()  # ws.send() isn't safe to call from two threads at once
 
     def frame_sender():
         while not stop.is_set():
             try:
-                data, _mimetype = capture_frame_bytes()
+                data, _mimetype = capture_frame_bytes(prefer_speed=rate_mode == "optimal")
                 with send_lock:
                     ws.send(data)
             except Exception:
                 break
-            stop.wait(WS_FRAME_INTERVAL)
+            ack_event.clear()
+            ack_event.wait(timeout=MAX_FRAME_ACK_WAIT)
+            if rate_mode == "slow":
+                stop.wait(WS_SLOW_INTERVAL)
 
     sender = threading.Thread(target=frame_sender, daemon=True)
     sender.start()
@@ -378,7 +414,10 @@ def ws_handler(ws):
                 break
             try:
                 data = json.loads(msg)
-                if data.get("type") == "ping":
+                kind = data.get("type")
+                if kind == "frame_ack":
+                    ack_event.set()
+                elif kind == "ping":
                     with send_lock:
                         ws.send(json.dumps({"type": "pong", "t": data.get("t")}))
                 else:
@@ -387,6 +426,7 @@ def ws_handler(ws):
                 pass  # malformed/failed message — drop it, keep the connection alive
     finally:
         stop.set()
+        ack_event.set()  # unstick the sender if it's mid-wait
         sender.join(timeout=1)
 
 
@@ -411,6 +451,12 @@ HTML_PAGE = """
         #topbar span#status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
         #topbar span#status.ok { background: #1e7e34; }
         #topbar span#status.bad { background: #a11; }
+        #settingsPanel {
+            display: none; gap: 16px; padding: 10px 8px; background: #181818;
+            border-top: 1px solid #333; flex-wrap: wrap; align-items: center;
+        }
+        #settingsPanel.open { display: flex; }
+        #settingsPanel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #ccc; }
         #screenWrap { position: relative; touch-action: none; overflow: hidden; }
         #zoomLayer { transform-origin: 0 0; will-change: transform; }
         #screen { width: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
@@ -432,7 +478,7 @@ HTML_PAGE = """
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
         body.compact #topbar, body.compact #textRow, body.compact #controls,
-        body.compact #clickRow { display: none; }
+        body.compact #clickRow, body.compact #settingsPanel { display: none; }
         #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111; }
         @media (min-width: 600px) {
             /* Wide viewports (tablets, unfolded foldables, desktop) get the
@@ -469,14 +515,25 @@ HTML_PAGE = """
     <div id="topbar">
         <b>Poor Person's KVM</b>
         <span id="status">connecting...</span>
-        <select id="transportMode">
-            <option value="poll">Polling</option>
-            <option value="ws" selected>WebSocket</option>
-        </select>
         <button id="zoomOutBtn">Zoom −</button>
         <button id="zoomInBtn">Zoom +</button>
         <button id="resetZoom">Reset Zoom</button>
         <button id="fullscreenBtn">Fullscreen</button>
+        <button id="settingsBtn">⚙ Settings</button>
+    </div>
+    <div id="settingsPanel">
+        <label>Transport
+            <select id="transportMode">
+                <option value="poll">Polling</option>
+                <option value="ws" selected>WebSocket</option>
+            </select>
+        </label>
+        <label>Refresh rate
+            <select id="rateMode">
+                <option value="optimal" selected>Optimal (fastest)</option>
+                <option value="slow">Slow</option>
+            </select>
+        </label>
     </div>
     <div id="screenWrap">
         <div id="zoomLayer">
@@ -663,6 +720,12 @@ HTML_PAGE = """
         // the single call site the gesture/keyboard code below goes through,
         // so it doesn't need to know which transport is live.
         let transportMode = 'ws';
+        // 'optimal': self-adjusting, as fast as the connection can sustain
+        // (see /ws's frame_ack-gated pacing server-side, and the polling
+        // loop below). 'slow': adds a deliberate floor on top, for when
+        // conserving bandwidth matters more than freshness.
+        let rateMode = 'optimal';
+        const SLOW_INTERVAL_MS = 2000; // mirrors the server's WS_SLOW_INTERVAL default
         let ws = null;
         let wsFrameUrl = null; // current blob: URL backing the <img>, for revocation
 
@@ -678,10 +741,16 @@ HTML_PAGE = """
 
         function connectWS() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN);
+            ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode);
             ws.binaryType = 'blob';
             ws.onmessage = (evt) => {
                 if (evt.data instanceof Blob) {
+                    // Ack immediately, before any decode/render work, so the
+                    // round trip the server paces on reflects transport time,
+                    // not client-side processing time.
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'frame_ack' }));
+                    }
                     markFreshFrame();
                     const url = URL.createObjectURL(evt.data);
                     const previous = wsFrameUrl;
@@ -709,17 +778,53 @@ HTML_PAGE = """
             if (wsFrameUrl) { URL.revokeObjectURL(wsFrameUrl); wsFrameUrl = null; }
         }
 
+        function fetchScreenshotOnce() {
+            return new Promise((resolve) => {
+                const sentAt = performance.now();
+                const next = new Image();
+                next.onload = () => {
+                    img.src = next.src;
+                    markRTT(performance.now() - sentAt);
+                    resolve(true);
+                };
+                next.onerror = () => resolve(false);
+                next.src = '/screenshot?token=' + TOKEN + '&rate=' + rateMode + '&t=' + Date.now();
+            });
+        }
+
+        // One-shot nudge (e.g. "get a frame sooner after this click") — used
+        // as fire-and-forget, independent of the self-pacing loop below.
         function refreshScreen() {
-            // No-op in WebSocket mode — frames already arrive on a push
-            // timer, so this HTTP fetch would just be a redundant one.
+            // No-op in WebSocket mode — frames already arrive on their own
+            // ack-paced schedule, so this HTTP fetch would just be redundant.
             if (transportMode !== 'poll') return;
-            const sentAt = performance.now();
-            const next = new Image();
-            next.onload = () => {
-                img.src = next.src;
-                markRTT(performance.now() - sentAt);
-            };
-            next.src = '/screenshot?token=' + TOKEN + '&t=' + Date.now();
+            fetchScreenshotOnce();
+        }
+
+        // Polling's own self-pacing loop: fetch, wait for the response, then
+        // schedule the next fetch — rather than firing on a fixed timer
+        // regardless of how long the last request actually took. This is
+        // polling's equivalent of /ws's frame_ack gating: a slow network
+        // naturally stretches the interval instead of piling up requests
+        // behind each other. 'slow' mode adds a floor on top, same as WS.
+        let pollLoopActive = false;
+
+        function pollLoopStep() {
+            if (!pollLoopActive || transportMode !== 'poll') return;
+            fetchScreenshotOnce().finally(() => {
+                if (!pollLoopActive || transportMode !== 'poll') return;
+                setTimeout(pollLoopStep, rateMode === 'slow' ? SLOW_INTERVAL_MS : 0);
+            });
+        }
+
+        function startPollLoop() {
+            if (pollLoopActive) return;
+            pollLoopActive = true;
+            pollLoopStep();
+        }
+
+        function stopPollLoop() {
+            pollLoopActive = false;
         }
 
         // Offset the reported pointer position up-left of the actual touch so
@@ -903,6 +1008,9 @@ HTML_PAGE = """
         bindClickButton('rightClickBtn', 'right');
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
+        document.getElementById('settingsBtn').addEventListener('click', () => {
+            document.getElementById('settingsPanel').classList.toggle('open');
+        });
         document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(ZOOM_STEP));
         document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
 
@@ -913,10 +1021,22 @@ HTML_PAGE = """
             lastFrameTime = Date.now();
             lastRTT = 0;
             if (transportMode === 'ws') {
+                stopPollLoop();
                 connectWS();
             } else {
                 disconnectWS();
-                refreshScreen(); // get a frame now instead of waiting for the next poll tick
+                startPollLoop();
+            }
+        });
+
+        document.getElementById('rateMode').addEventListener('change', (e) => {
+            rateMode = e.target.value;
+            // WS reads its rate mode once at connect time (?rate=...), so a
+            // running connection needs to be reopened to pick up the change.
+            // Polling's loop just reads the shared variable on its next tick.
+            if (transportMode === 'ws' && ws) {
+                disconnectWS();
+                connectWS();
             }
         });
 
@@ -978,8 +1098,7 @@ HTML_PAGE = """
 
         pollHealth();
         setInterval(pollHealth, 5000);
-        setInterval(refreshScreen, 1500);
-        if (transportMode === 'ws') connectWS();
+        if (transportMode === 'ws') connectWS(); else startPollLoop();
     </script>
 </body>
 </html>
