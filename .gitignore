@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 *.png
+!static/*.png
 *.avif
 *.jpg
 *.jpeg

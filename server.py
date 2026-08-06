@@ -108,6 +108,84 @@ def index():
     return Response(HTML_PAGE.replace("TOKEN_PLACEHOLDER", AUTH_TOKEN), mimetype="text/html")
 
 
+@app.route("/manifest.json")
+def manifest():
+    # start_url carries the token so tapping the installed home-screen icon
+    # opens straight into the authenticated app — no re-entering anything.
+    # Note: this token is only as durable as AUTH_TOKEN itself. Without
+    # KVM_TOKEN pinned in the environment, a server restart mints a new
+    # random token and the installed icon's start_url goes stale (reinstall
+    # needed) — set KVM_TOKEN if you want the install to survive restarts.
+    icon = lambda name, purpose: {  # noqa: E731
+        "src": f"/static/{name}?token={AUTH_TOKEN}",
+        "type": "image/png",
+        "purpose": purpose,
+    }
+    manifest_json = {
+        "name": "Poor Person's KVM",
+        "short_name": "KVM",
+        "description": "Self-hosted remote view + control for your own Mac",
+        "start_url": f"/?token={AUTH_TOKEN}",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#1a1a1a",
+        "theme_color": "#1a1a1a",
+        "icons": [
+            {**icon("icon-192.png", "any"), "sizes": "192x192"},
+            {**icon("icon-192.png", "maskable"), "sizes": "192x192"},
+            {**icon("icon-512.png", "any"), "sizes": "512x512"},
+            {**icon("icon-512.png", "maskable"), "sizes": "512x512"},
+        ],
+    }
+    return jsonify(manifest_json)
+
+
+@app.route("/sw.js")
+def service_worker():
+    # Network-first, and ONLY for the static app shell (this page, the
+    # manifest, icons). Screenshots/health/input stay pure network-only —
+    # a stale cached "fallback" for any of those would be actively
+    # misleading in a live remote-control tool, and /screenshot's
+    # cache-busted URLs would otherwise grow the cache without bound.
+    # skipWaiting + clients.claim make a new SW version take over
+    # immediately instead of waiting for every tab to close; the page
+    # listens for the resulting controllerchange and reloads itself so an
+    # update is never silently stuck on old JS.
+    js = """
+const CACHE_NAME = 'kvm-shell-v1';
+const SHELL_PATHS = ['/', '/manifest.json', '/sw.js'];
+
+function isShellRequest(url) {
+    const path = new URL(url).pathname;
+    return SHELL_PATHS.includes(path) || path.startsWith('/static/');
+}
+
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+self.addEventListener('fetch', (e) => {
+    if (e.request.method === 'GET' && isShellRequest(e.request.url)) {
+        e.respondWith(
+            fetch(e.request)
+                .then((response) => {
+                    const copy = response.clone();
+                    // waitUntil keeps the worker alive for this write — without
+                    // it the browser can terminate the worker right after the
+                    // response above resolves, before the cache is ever updated.
+                    e.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(e.request, copy)));
+                    return response;
+                })
+                .catch(() => caches.match(e.request))
+        );
+        return;
+    }
+    e.respondWith(fetch(e.request));
+});
+"""
+    return Response(js, mimetype="application/javascript")
+
+
 @app.route("/health")
 def health():
     try:
@@ -306,6 +384,13 @@ HTML_PAGE = """
 <head>
     <title>Poor Person's KVM</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#1a1a1a">
+    <link rel="manifest" href="/manifest.json?token=TOKEN_PLACEHOLDER">
+    <link rel="icon" type="image/png" href="/static/icon-192.png?token=TOKEN_PLACEHOLDER">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?token=TOKEN_PLACEHOLDER">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="KVM">
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif; }
@@ -384,6 +469,23 @@ HTML_PAGE = """
 
     <script>
         const TOKEN = "TOKEN_PLACEHOLDER";
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js?token=' + TOKEN).catch(() => {});
+            // controllerchange fires both when a SW first claims this page
+            // (right after install — not an update, don't reload) and when a
+            // *new* SW version takes over from a previous one (a genuine
+            // update). Only reload for the latter: skip the first occurrence.
+            let controllerSeen = !!navigator.serviceWorker.controller;
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (controllerSeen) {
+                    location.reload();
+                } else {
+                    controllerSeen = true;
+                }
+            });
+        }
+
         const img = document.getElementById('screen');
         const zoomLayer = document.getElementById('zoomLayer');
         const screenWrap = document.getElementById('screenWrap');
