@@ -740,9 +740,19 @@ HTML_PAGE = """
                the natural sizes of every row together don't fit in the
                viewport — same shrink-to-fit behavior as before, just without
                also hoarding surplus space. See #textRow below for where
-               surplus space actually goes. */
+               surplus space actually goes.
+
+               aspect-ratio is set here too (not just on #screenWrap below) so
+               this box's height is pinned from its own definite width alone,
+               before the <img> has ever loaded a frame — with flex-grow: 0,
+               an "auto" height would otherwise be derived from content
+               (#screenWrap), which isn't reliably sized yet on first paint
+               and was causing a layout shift (and a knock-on jump in
+               #textRow's height, since it grows into whatever this box
+               *doesn't* use) right up until the first frame arrived. */
             flex: 0 1 auto; min-height: 0; display: flex;
             align-items: center; justify-content: center; overflow: hidden; background: #000;
+            aspect-ratio: SCREEN_ASPECT_PLACEHOLDER;
         }
         #topbar {
             position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap;
@@ -873,17 +883,22 @@ HTML_PAGE = """
         }
         #clickRow button.held { background: #2a63c9; border-color: #2a63c9; }
         #textRow {
-            display: flex; gap: 6px; padding: 12px; background: #111;
+            /* Same outer padding as #clickRow/#controls — this row's extra
+               height comes entirely from #textInput/#sendText growing
+               taller (align-items' default "stretch" fills whatever height
+               this row ends up with), not from extra padding on the row
+               itself, so the space between bars reads the same as the gap
+               between buttons within a bar. */
+            display: flex; gap: 6px; padding: 8px; background: #111;
             /* The one row that grows: it soaks up whatever vertical space is
                left over once the video and every other (fixed-size) row have
                taken exactly what they need — see #screenCenterer above.
                flex-shrink: 0 keeps it from ever getting squeezed below its
-               own natural (already-taller-than-before) size; on a deficit,
-               #screenCenterer gives way first. max-height stops it from
-               ballooning on narrow/tall viewports where the topbar and
-               controls wrap to multiple lines and leave a lot of leftover
-               space — comfortably roomy without turning into an oversized
-               single-line input. */
+               own natural size; on a deficit, #screenCenterer gives way
+               first. max-height stops it from ballooning on narrow/tall
+               viewports where the topbar and controls wrap to multiple lines
+               and leave a lot of leftover space — comfortably roomy without
+               turning into an oversized single-line input. */
             flex: 1 0 auto; max-height: 140px;
         }
         #textInput, #sendText { font-size: 16px; }
