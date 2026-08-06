@@ -458,7 +458,21 @@ HTML_PAGE = """
     <meta name="apple-mobile-web-app-title" content="KVM">
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif; }
+        body {
+            margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif;
+            display: flex; flex-direction: column; height: 100dvh;
+            /* Needs to be a definite height, not min-height — flexbox only
+               actually shrinks #screenCenterer below its content's natural
+               size (forcing the image to shrink to fit) when the container
+               has a hard height to shrink against; min-height just raises
+               the floor and lets body grow past it instead, which is what
+               was still leaving the image slightly too tall to fit. */
+        }
+        #topbar, #clickRow, #textRow, #controls { flex-shrink: 0; }
+        #screenCenterer {
+            flex: 1 1 auto; min-height: 0; display: flex;
+            align-items: center; justify-content: center; overflow: hidden; background: #000;
+        }
         #topbar {
             position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap;
             /* Requires viewport-fit=cover on the viewport meta tag, or this
@@ -467,7 +481,15 @@ HTML_PAGE = """
                interaction on Android) so it only ever adds space, never
                changes how the page's overall height is computed. */
             padding-top: max(8px, env(safe-area-inset-top, 8px));
+            /* Full width up to a real device's width (Pixel Fold unfolded,
+               851px — the widest we have actual measurements for); wider
+               than that (tablets, desktop) and it caps out and centers
+               instead of stretching edge to edge. width:100% is needed
+               explicitly — as a column-direction flex item, this doesn't
+               stretch to fill on its own once margin:auto is involved. */
+            width: 100%; max-width: 851px; margin-left: auto; margin-right: auto;
         }
+        #topbar > button { flex: 1 1 auto; }
         #topbar span#status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
         #topbar span#status.ok { background: #1e7e34; }
         #topbar span#status.bad { background: #a11; }
@@ -490,12 +512,24 @@ HTML_PAGE = """
             padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
                      env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
         }
-        #screenWrap { position: relative; touch-action: none; overflow: hidden; }
-        #zoomLayer { transform-origin: 0 0; will-change: transform; }
-        #screen {
-            width: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none;
+        #screenWrap {
+            position: relative; touch-action: none; overflow: hidden;
+            /* This is the ONE element that shrinks to fit available space —
+               #zoomLayer and #screen below just fill it at 100%/100%, so
+               they always stay exactly the same size as #screenWrap. That
+               matters: the pointer/pinch-zoom math (toMacCoords,
+               updateCursorDot, startPinch/updatePinch) reads screenWrap's
+               and the image's rects interchangeably, assuming they're
+               identical — if this box instead centered a smaller
+               letterboxed image inside a larger fixed-size wrap, all of
+               that math would need a separate "where's the actual image
+               within the wrap" offset. Keeping wrap == image avoids that
+               entirely. */
+            max-width: 100%; max-height: 100%; width: auto; height: auto;
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER; background: #000;
         }
+        #zoomLayer { width: 100%; height: 100%; transform-origin: 0 0; will-change: transform; }
+        #screen { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
         #cursorDot {
             position: absolute; top: 0; left: 0; width: 24px; height: 34px;
             pointer-events: none; opacity: 0; z-index: 10;
@@ -524,6 +558,10 @@ HTML_PAGE = """
             /* Same reasoning as #topbar's padding-top above: scoped to the
                actual last element in normal flow, not body. */
             padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+            /* Same width capping as #topbar — full width up to a real
+               device's width, centered beyond that. Buttons stay their
+               natural size here (only the top bar's are asked to stretch). */
+            width: 100%; max-width: 851px; margin-left: auto; margin-right: auto;
         }
         @media (min-width: 600px) {
             /* Wide viewports (tablets, unfolded foldables, desktop) get the
@@ -569,8 +607,8 @@ HTML_PAGE = """
         <div id="settingsPanel">
             <label>Transport
                 <select id="transportMode">
-                    <option value="poll">Repeated requests</option>
-                    <option value="ws" selected>Persistent connection (optimal)</option>
+                    <option value="poll">Polling</option>
+                    <option value="ws" selected>WebSocket (optimal)</option>
                 </select>
             </label>
             <label>Refresh rate
@@ -584,18 +622,20 @@ HTML_PAGE = """
         </div>
     </div>
     <div id="safeAreaProbe"></div>
-    <div id="screenWrap">
-        <div id="zoomLayer">
-            <img id="screen" src="/screenshot?token=TOKEN_PLACEHOLDER">
-        </div>
-        <div id="cursorDot">
-            <svg width="24" height="34" viewBox="0 0 20 28">
-                <path d="M0,0 L0,20 L5,15.5 L8.5,23 L11.5,21.5 L8,14 L14,14 Z"/>
-            </svg>
-        </div>
-        <div id="staleOverlay">
-            <b>⚠ Connection is slow</b>
-            <span id="staleAge"></span>
+    <div id="screenCenterer">
+        <div id="screenWrap">
+            <div id="zoomLayer">
+                <img id="screen" src="/screenshot?token=TOKEN_PLACEHOLDER">
+            </div>
+            <div id="cursorDot">
+                <svg width="24" height="34" viewBox="0 0 20 28">
+                    <path d="M0,0 L0,20 L5,15.5 L8.5,23 L11.5,21.5 L8,14 L14,14 Z"/>
+                </svg>
+            </div>
+            <div id="staleOverlay">
+                <b>⚠ Connection is slow</b>
+                <span id="staleAge"></span>
+            </div>
         </div>
     </div>
     <div id="clickRow">
