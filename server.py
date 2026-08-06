@@ -23,6 +23,7 @@ import time
 
 import pyautogui
 import Quartz
+from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 from flask import Flask, Response, abort, jsonify, request, send_file
 from flask_sock import Sock
 from PIL import Image
@@ -31,6 +32,15 @@ from generate_icons import draw_icon
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.01
+
+# Framework Python re-execs itself through Resources/Python.app to get
+# WindowServer access (needed for the Quartz screenshot/input calls below),
+# which makes it a real, Dock-visible application by default — but since
+# this process never runs an actual Cocoa event loop, macOS sees it as
+# unresponsive (bouncing Dock icon, "Application Not Responding"). Marking
+# it as an accessory app tells macOS not to expect a Dock presence or an
+# event loop from it at all.
+NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 # static_folder=None: the only "static" assets are the three PWA icons
 # below, which are now generated per-request (see machine_icon_color())
