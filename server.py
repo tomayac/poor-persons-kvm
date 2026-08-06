@@ -754,6 +754,13 @@ HTML_PAGE = """
             align-items: center; justify-content: center; overflow: hidden; background: #000;
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER;
         }
+        /* Same margin-block-end treatment as #clickRow/#textRow below, so the
+           video-to-first-bar gap matches the gap between the bars
+           themselves. Scoped to non-compact mode — in fullscreen,
+           #clickRow/#textRow/#controls are all display:none, so this margin
+           would otherwise leave a stray gap at the very bottom instead of
+           between two visible things. */
+        body:not(.compact) #screenCenterer { margin-block-end: 8px; }
         #topbar {
             position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap;
             /* Requires viewport-fit=cover on the viewport meta tag, or this
