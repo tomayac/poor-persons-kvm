@@ -19,8 +19,12 @@ OUTLINE = (20, 40, 90, 255)  # subtle dark edge so the cursor reads over the mon
 CANVAS = 512
 
 
-def draw_icon():
-    img = Image.new("RGBA", (CANVAS, CANVAS), BG)
+def draw_icon(bg_color=BG):
+    # bg_color is parameterized so server.py can generate a differently
+    # colored icon per machine at request time (see machine_icon_color()) —
+    # this module has no Flask dependency, so server.py imports draw_icon()
+    # from here rather than duplicating the drawing code.
+    img = Image.new("RGBA", (CANVAS, CANVAS), bg_color)
     d = ImageDraw.Draw(img)
 
     # Monitor: rounded-rect outline, kept within the ~70% safe zone.

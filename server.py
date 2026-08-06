@@ -25,11 +25,18 @@ import pyautogui
 import Quartz
 from flask import Flask, Response, abort, jsonify, request, send_file
 from flask_sock import Sock
+from PIL import Image
+
+from generate_icons import draw_icon
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.01
 
-app = Flask(__name__)
+# static_folder=None: the only "static" assets are the three PWA icons
+# below, which are now generated per-request (see machine_icon_color())
+# rather than served as files, so there's nothing left for Flask's default
+# /static/<path:filename> auto-route to serve.
+app = Flask(__name__, static_folder=None)
 sock = Sock(app)
 
 # Set KVM_TOKEN in the environment to pin a fixed token across restarts
@@ -114,7 +121,7 @@ LOGIN_SHELL_HTML = """
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Poor Person's KVM — Sign in</title>
+    <title>APP_TITLE_PLACEHOLDER — Sign in</title>
     <style>
         body {
             margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
@@ -129,7 +136,7 @@ LOGIN_SHELL_HTML = """
 </head>
 <body>
     <form id="loginForm">
-        <b>Poor Person's KVM</b>
+        <b>APP_TITLE_PLACEHOLDER</b>
         <input id="tokenField" placeholder="Access token (or paste the full URL)" autocomplete="off" autocapitalize="off">
         <button type="submit">Connect</button>
         <p>Find this in the terminal output where the server was started.</p>
@@ -170,7 +177,8 @@ def unauthorized(_e):
     # should keep getting a plain JSON 401. Only the page itself needs the
     # login shell — that's what actually gets navigated to by the browser.
     if request.path == "/":
-        return Response(LOGIN_SHELL_HTML, mimetype="text/html"), 401
+        html = LOGIN_SHELL_HTML.replace("APP_TITLE_PLACEHOLDER", app_title())
+        return Response(html, mimetype="text/html"), 401
     return jsonify({"error": "unauthorized"}), 401
 
 
@@ -187,8 +195,81 @@ def index():
         aspect_ratio = f"{screen_w} / {screen_h}"
     except Exception:
         aspect_ratio = "16 / 9"
-    html = HTML_PAGE.replace("TOKEN_PLACEHOLDER", AUTH_TOKEN).replace("SCREEN_ASPECT_PLACEHOLDER", aspect_ratio)
+    html = (
+        HTML_PAGE.replace("TOKEN_PLACEHOLDER", AUTH_TOKEN)
+        .replace("SCREEN_ASPECT_PLACEHOLDER", aspect_ratio)
+        .replace("APP_TITLE_PLACEHOLDER", app_title())
+        .replace("APP_SHORT_TITLE_PLACEHOLDER", app_short_title())
+    )
     return Response(html, mimetype="text/html")
+
+
+# Both machines in this deployment run this exact same server.py (see
+# kvm.conf's two server blocks, each proxying a different hostname to a
+# different Mac) — the only thing that tells them apart, from the server's
+# own point of view, is which hostname a client used to reach it, which
+# nginx forwards transparently via the Host header. Used purely to give
+# each machine's installed PWA a visibly different icon/name so they're
+# distinguishable on a phone's home screen — no separate per-machine
+# config needed, and any other hostname (plain LAN access, etc.) just
+# gets the original default look.
+MACHINE_COLORS = {
+    "Primary": (42, 99, 201, 255),     # the app's existing accent blue
+    "Secondary": (201, 130, 42, 255),  # amber — clearly distinct from blue
+}
+DEFAULT_ICON_COLOR = MACHINE_COLORS["Primary"]
+
+
+def machine_label():
+    host = (request.host or "").lower()
+    if "primary" in host:
+        return "Primary"
+    if "secondary" in host:
+        return "Secondary"
+    return None
+
+
+def machine_icon_color():
+    return MACHINE_COLORS.get(machine_label(), DEFAULT_ICON_COLOR)
+
+
+def app_title():
+    label = machine_label()
+    return f"Poor Person's KVM ({label})" if label else "Poor Person's KVM"
+
+
+def app_short_title():
+    label = machine_label()
+    return f"KVM {label}" if label else "KVM"
+
+
+def _icon_response(size):
+    img = draw_icon(machine_icon_color())
+    if size != 512:
+        img = img.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    buf.seek(0)
+    resp = send_file(buf, mimetype="image/png")
+    # Constant for a given host — cheap to regenerate, but no reason not to
+    # let the browser skip asking again for a while.
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
+@app.route("/static/icon-192.png")
+def icon_192():
+    return _icon_response(192)
+
+
+@app.route("/static/icon-512.png")
+def icon_512():
+    return _icon_response(512)
+
+
+@app.route("/static/apple-touch-icon.png")
+def apple_touch_icon():
+    return _icon_response(180)
 
 
 @app.route("/manifest.json")
@@ -205,8 +286,8 @@ def manifest():
         "purpose": purpose,
     }
     manifest_json = {
-        "name": "Poor Person's KVM",
-        "short_name": "KVM",
+        "name": app_title(),
+        "short_name": app_short_title(),
         "description": "Self-hosted remote view + control for your own Mac",
         "start_url": f"/?token={AUTH_TOKEN}",
         "scope": "/",
@@ -627,7 +708,7 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Poor Person's KVM</title>
+    <title>APP_TITLE_PLACEHOLDER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#111">
     <link rel="manifest" href="/manifest.json?token=TOKEN_PLACEHOLDER">
@@ -636,7 +717,7 @@ HTML_PAGE = """
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="KVM">
+    <meta name="apple-mobile-web-app-title" content="APP_SHORT_TITLE_PLACEHOLDER">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -788,7 +869,7 @@ HTML_PAGE = """
 </head>
 <body>
     <div id="topbar">
-        <b>Poor Person's KVM</b>
+        <b>APP_SHORT_TITLE_PLACEHOLDER</b>
         <span id="status">connecting...</span>
         <button id="zoomOutBtn">Zoom −</button>
         <button id="zoomInBtn">Zoom +</button>
