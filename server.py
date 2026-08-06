@@ -650,7 +650,14 @@ HTML_PAGE = """
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER; background: #000;
         }
         #zoomLayer { width: 100%; height: 100%; transform-origin: 0 0; will-change: transform; }
-        #screen { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+        #screen {
+            width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none;
+            /* iOS Safari's equivalent of Android's long-press "Save image"
+               sheet — the contextmenu preventDefault below covers Android;
+               this covers the same case on iOS, which doesn't fire
+               contextmenu for it. */
+            -webkit-touch-callout: none; -webkit-user-drag: none;
+        }
         #cursorDot {
             position: absolute; top: 0; left: 0; width: 24px; height: 34px;
             pointer-events: none; opacity: 0; z-index: 10;
@@ -1211,6 +1218,13 @@ HTML_PAGE = """
             e.preventDefault();
             sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
         }, { passive: false });
+
+        // A long-press on an <img> fires 'contextmenu' (Android's touch
+        // equivalent of a right-click) independently of the touch-action/
+        // pointer handling above — that's what triggers the native "Save
+        // image" / "Copy image" sheet. Suppressing it here is the actual
+        // fix; touch-action:none alone only stops default pan/zoom gestures.
+        screenWrap.addEventListener('contextmenu', (e) => e.preventDefault());
 
         // Left/Right Click buttons: press-and-hold sends mousedown and keeps
         // the button down on the Mac side until released, exactly like a
