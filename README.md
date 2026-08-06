@@ -32,6 +32,15 @@ Set `KVM_TOKEN` in the environment to pin a fixed token across restarts (handy d
 
 The browser remembers the token in `localStorage` after a successful visit, so a later bare visit to the domain (no `?token=` in the URL) gets transparently redirected rather than rejected — "Log Out" in Settings clears it. This only actually persists across server restarts if `KVM_TOKEN` is pinned; otherwise the remembered token goes stale the same way a bookmarked URL would, and the sign-in page's field takes a fresh token (or a pasted full URL — it extracts `?token=` from either).
 
+## Running at login (autostart)
+
+The server can be kept running automatically via a `launchd` LaunchAgent — but launchd-spawned processes don't carry the Screen Recording/Accessibility grants an interactive terminal app already has, and granting them separately means targeting Homebrew's actual interpreter binary, whose path moves every time `python@3.14` gets upgraded. Two things sidestep that:
+
+- The LaunchAgent doesn't run Python directly. It periodically (via `StartInterval`) runs a cheap check — if the server's already listening on its port, it's a no-op; otherwise it tells iTerm (via `osascript`/AppleScript, `create window with default profile command "..."`) to launch it. As iTerm's own child, the server inherits iTerm's already-granted permissions instead of needing its own. The launch command backgrounds the server and `disown`s it, so it survives iTerm's window closing right back down — permission is resolved once at first use, not re-checked against live process ancestry, so the server keeps working fully detached.
+- Framework Python re-execs itself through a bundled `Python.app` stub to get WindowServer access (needed for the Quartz-based screenshot/input calls) — which makes it a real, Dock-visible app by default despite having no window. Since it never runs a Cocoa event loop, macOS considers it "unresponsive" (bouncing Dock icon). `server.py` sets its activation policy to "accessory" at startup specifically to suppress this.
+
+The LaunchAgent plist and its helper scripts (the polling check, the AppleScript, the actual `KVM_TOKEN`) intentionally live outside this repo (`~/Library/LaunchAgents` and `~/Library/Application Support/poor-persons-kvm/`), since this repo is public — none of that is checked in.
+
 ## Installing as an app
 
 The page is an installable PWA — on the phone's browser, use "Add to Home Screen" (iOS Safari share sheet) or the install prompt (Android Chrome). The installed icon's `start_url` bakes in the current auth token, so launching it opens straight into the app.
