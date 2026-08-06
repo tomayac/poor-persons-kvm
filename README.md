@@ -34,12 +34,20 @@ The browser remembers the token in `localStorage` after a successful visit, so a
 
 ## Running at login (autostart)
 
-The server can be kept running automatically via a `launchd` LaunchAgent — but launchd-spawned processes don't carry the Screen Recording/Accessibility grants an interactive terminal app already has, and granting them separately means targeting Homebrew's actual interpreter binary, whose path moves every time `python@3.14` gets upgraded. Two things sidestep that:
+```bash
+KVM_TOKEN=your-token-here ./scripts/setup-autostart.sh
+```
+
+Installs (and immediately starts) a `launchd` LaunchAgent that keeps `server.py` running across reboots/logins. Re-running it (e.g. on another Mac, with that machine's own token) regenerates everything from scratch — nothing machine-specific is hardcoded in the script itself.
+
+launchd-spawned processes don't carry the Screen Recording/Accessibility grants an interactive terminal app already has, and granting them separately means targeting Homebrew's actual interpreter binary, whose path moves every time `python@3.14` gets upgraded. Two things sidestep that:
 
 - The LaunchAgent doesn't run Python directly. It periodically (via `StartInterval`) runs a cheap check — if the server's already listening on its port, it's a no-op; otherwise it tells iTerm (via `osascript`/AppleScript, `create window with default profile command "..."`) to launch it. As iTerm's own child, the server inherits iTerm's already-granted permissions instead of needing its own. The launch command backgrounds the server and `disown`s it, so it survives iTerm's window closing right back down — permission is resolved once at first use, not re-checked against live process ancestry, so the server keeps working fully detached.
 - Framework Python re-execs itself through a bundled `Python.app` stub to get WindowServer access (needed for the Quartz-based screenshot/input calls) — which makes it a real, Dock-visible app by default despite having no window. Since it never runs a Cocoa event loop, macOS considers it "unresponsive" (bouncing Dock icon). `server.py` sets its activation policy to "accessory" at startup specifically to suppress this.
 
-The LaunchAgent plist and its helper scripts (the polling check, the AppleScript, the actual `KVM_TOKEN`) intentionally live outside this repo (`~/Library/LaunchAgents` and `~/Library/Application Support/poor-persons-kvm/`), since this repo is public — none of that is checked in.
+The generated LaunchAgent plist and its helper scripts (which do contain the actual token) are written to `~/Library/LaunchAgents` and `~/Library/Application Support/poor-persons-kvm/` — outside this repo, since it's public. The server's own log (`~/Library/Logs/poor-persons-kvm.log`) has no automatic rotation from macOS, so the periodic check trims it to its last ~5MB itself whenever it runs.
+
+The first time this runs, Screen Recording/Accessibility calls will fail (500s from `/health`) until iTerm itself has been granted both in System Settings > Privacy & Security — a one-time step, since iTerm's own app path doesn't move around the way Homebrew's does.
 
 ## Installing as an app
 
