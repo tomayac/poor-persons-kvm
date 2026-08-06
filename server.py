@@ -13,22 +13,30 @@ iTerm, or python3 itself) — keep using the same terminal app each time.
 """
 import hmac
 import io
+import json
 import os
 import secrets
 import socket
+import threading
 
 import pyautogui
 from flask import Flask, Response, abort, jsonify, request, send_file
+from flask_sock import Sock
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.01
 
 app = Flask(__name__)
+sock = Sock(app)
 
 # Set KVM_TOKEN in the environment to pin a fixed token across restarts
 # (handy during development); otherwise a fresh random one is generated
 # on every launch.
 AUTH_TOKEN = os.environ.get("KVM_TOKEN") or secrets.token_urlsafe(24)
+
+# How often the /ws connection pushes a fresh frame, in seconds. Lower is
+# smoother but costs more bandwidth/CPU per frame capture (~100-300ms each).
+WS_FRAME_INTERVAL = float(os.environ.get("KVM_WS_INTERVAL", "0.35"))
 
 # cmd/alt are Mac-friendly aliases for pyautogui's actual key names.
 KEY_ALIASES = {
@@ -55,6 +63,19 @@ def pag(fn, *args, **kwargs):
         except KeyError as e:
             last_err = e
     raise last_err
+
+
+# macOS's screen-capture API errors ("could not create image from display")
+# when hit by overlapping calls — with threaded=True, polling tabs, /health
+# checks, and the /ws frame sender can all land at once. Input handling stays
+# fully concurrent (that's what threaded=True is actually for); only the
+# capture itself is serialized.
+screenshot_lock = threading.Lock()
+
+
+def take_screenshot():
+    with screenshot_lock:
+        return pag(pyautogui.screenshot)
 
 
 def local_ip():
@@ -90,7 +111,7 @@ def index():
 @app.route("/health")
 def health():
     try:
-        img = pag(pyautogui.screenshot)
+        img = take_screenshot()
         min_val, max_val = img.convert("L").getextrema()
         blank = (max_val - min_val) < 3
         return jsonify({
@@ -103,40 +124,102 @@ def health():
         return jsonify({"screenshot_ok": False, "error": str(e)}), 500
 
 
-@app.route("/screenshot")
-def screenshot():
-    try:
-        img = pag(pyautogui.screenshot)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def capture_frame_bytes():
+    """Capture one screenshot and encode it, shared by /screenshot and /ws."""
+    img = take_screenshot()
     buf = io.BytesIO()
     try:
         img.save(buf, "AVIF", quality=55)
-        mimetype = "image/avif"
+        return buf.getvalue(), "image/avif"
     except Exception:
         # Fall back to JPEG if AVIF isn't available in this Pillow build.
         # JPEG has no alpha channel, but macOS screenshots come back as RGBA
         # — drop the alpha or Pillow's JPEG encoder raises KeyError('RGBA').
         buf = io.BytesIO()
         img.convert("RGB").save(buf, "JPEG", quality=70)
-        mimetype = "image/jpeg"
-    buf.seek(0)
-    return send_file(buf, mimetype=mimetype)
+        return buf.getvalue(), "image/jpeg"
+
+
+@app.route("/screenshot")
+def screenshot():
+    try:
+        data, mimetype = capture_frame_bytes()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return send_file(io.BytesIO(data), mimetype=mimetype)
 
 
 def resolve_button(name):
     return name if name in ("left", "right", "middle") else "left"
 
 
+# Shared input handlers — called from both the HTTP /input/* routes (for
+# "Polling" transport) and the /ws message loop (for "WebSocket" transport),
+# so the two transports can't drift in behavior.
+
+def do_mousedown(x, y, button):
+    pag(pyautogui.moveTo, x, y)
+    pag(pyautogui.mouseDown, button=resolve_button(button))
+
+
+def do_mousemove(x, y):
+    pag(pyautogui.moveTo, x, y)
+
+
+def do_mouseup(button):
+    pag(pyautogui.mouseUp, button=resolve_button(button))
+
+
+def do_scroll(dx, dy):
+    if dy:
+        pag(pyautogui.scroll, -dy)
+    if dx:
+        pag(pyautogui.hscroll, dx)
+
+
+def do_text(text):
+    if text:
+        pag(pyautogui.typewrite, text, interval=0.01)
+
+
+def do_key(combo):
+    keys = [KEY_ALIASES.get(k.lower(), k.lower()) for k in combo.split("+")]
+    if len(keys) > 1:
+        pag(pyautogui.hotkey, *keys)
+    else:
+        pag(pyautogui.press, keys[0])
+
+
+def dispatch_input(data):
+    """Run one input event dict (as sent over /ws) against the shared handlers."""
+    kind = data.get("type")
+    if kind == "mousedown":
+        x, y = data.get("x"), data.get("y")
+        if x is not None and y is not None:
+            do_mousedown(x, y, data.get("button", "left"))
+    elif kind == "mousemove":
+        x, y = data.get("x"), data.get("y")
+        if x is not None and y is not None:
+            do_mousemove(x, y)
+    elif kind == "mouseup":
+        do_mouseup(data.get("button", "left"))
+    elif kind == "scroll":
+        do_scroll(int(data.get("dx", 0)), int(data.get("dy", 0)))
+    elif kind == "text":
+        do_text(data.get("text", ""))
+    elif kind == "key":
+        combo = data.get("key", "")
+        if combo:
+            do_key(combo)
+
+
 @app.route("/input/mousedown", methods=["POST"])
 def mousedown():
     data = request.json or {}
     x, y = data.get("x"), data.get("y")
-    button = resolve_button(data.get("button", "left"))
     if x is None or y is None:
         abort(400)
-    pag(pyautogui.moveTo, x, y)
-    pag(pyautogui.mouseDown, button=button)
+    do_mousedown(x, y, data.get("button", "left"))
     return jsonify({"status": "ok"})
 
 
@@ -146,36 +229,28 @@ def mousemove():
     x, y = data.get("x"), data.get("y")
     if x is None or y is None:
         abort(400)
-    pag(pyautogui.moveTo, x, y)
+    do_mousemove(x, y)
     return jsonify({"status": "ok"})
 
 
 @app.route("/input/mouseup", methods=["POST"])
 def mouseup():
     data = request.json or {}
-    button = resolve_button(data.get("button", "left"))
-    pag(pyautogui.mouseUp, button=button)
+    do_mouseup(data.get("button", "left"))
     return jsonify({"status": "ok"})
 
 
 @app.route("/input/scroll", methods=["POST"])
 def scroll():
     data = request.json or {}
-    dx = int(data.get("dx", 0))
-    dy = int(data.get("dy", 0))
-    if dy:
-        pag(pyautogui.scroll, -dy)
-    if dx:
-        pag(pyautogui.hscroll, dx)
+    do_scroll(int(data.get("dx", 0)), int(data.get("dy", 0)))
     return jsonify({"status": "ok"})
 
 
 @app.route("/input/text", methods=["POST"])
 def type_text():
     data = request.json or {}
-    text = data.get("text", "")
-    if text:
-        pag(pyautogui.typewrite, text, interval=0.01)
+    do_text(data.get("text", ""))
     return jsonify({"status": "ok"})
 
 
@@ -185,15 +260,44 @@ def key_press():
     combo = data.get("key", "")
     if not combo:
         abort(400)
-    keys = [KEY_ALIASES.get(k.lower(), k.lower()) for k in combo.split("+")]
     try:
-        if len(keys) > 1:
-            pag(pyautogui.hotkey, *keys)
-        else:
-            pag(pyautogui.press, keys[0])
+        do_key(combo)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"status": "ok"})
+
+
+@sock.route("/ws")
+def ws_handler(ws):
+    """One WebSocket connection: pushes binary frames on a timer while
+    reading JSON input events off the same connection, replacing the
+    HTTP polling / POST round trips with a single persistent connection.
+    """
+    stop = threading.Event()
+
+    def frame_sender():
+        while not stop.is_set():
+            try:
+                data, _mimetype = capture_frame_bytes()
+                ws.send(data)
+            except Exception:
+                break
+            stop.wait(WS_FRAME_INTERVAL)
+
+    sender = threading.Thread(target=frame_sender, daemon=True)
+    sender.start()
+    try:
+        while True:
+            msg = ws.receive()
+            if msg is None:
+                break
+            try:
+                dispatch_input(json.loads(msg))
+            except Exception:
+                pass  # malformed/failed input event — drop it, keep the connection alive
+    finally:
+        stop.set()
+        sender.join(timeout=1)
 
 
 HTML_PAGE = """
@@ -225,10 +329,11 @@ HTML_PAGE = """
             padding: 4px 6px; border-radius: 8px; z-index: 20;
         }
         body.compact #topbar b, body.compact #topbar #status,
-        body.compact #topbar #rightClickToggle, body.compact #topbar #resetZoom { display: none; }
+        body.compact #topbar #rightClickToggle, body.compact #topbar #resetZoom,
+        body.compact #topbar #transportMode { display: none; }
         body.compact #textRow, body.compact #controls { display: none; }
         #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111; }
-        button { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+        button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
         button.active { background: #2a63c9; border-color: #2a63c9; }
         #textRow { display: flex; gap: 6px; padding: 8px; background: #111; }
@@ -239,6 +344,10 @@ HTML_PAGE = """
     <div id="topbar">
         <b>Poor Person's KVM</b>
         <span id="status">connecting...</span>
+        <select id="transportMode">
+            <option value="poll" selected>Polling</option>
+            <option value="ws">WebSocket</option>
+        </select>
         <button id="rightClickToggle">Right-click mode</button>
         <button id="resetZoom">Reset Zoom</button>
         <button id="fullscreenBtn">Fullscreen</button>
@@ -314,7 +423,7 @@ HTML_PAGE = """
                 if (pendingMove) {
                     const { x, y } = pendingMove;
                     pendingMove = null;
-                    post('/input/mousemove', { x, y });
+                    sendInput('mousemove', { x, y });
                 }
             }, MOUSEMOVE_INTERVAL);
         }
@@ -327,7 +436,7 @@ HTML_PAGE = """
             if (pendingMove) {
                 const { x, y } = pendingMove;
                 pendingMove = null;
-                return post('/input/mousemove', { x, y });
+                return sendInput('mousemove', { x, y });
             }
             return Promise.resolve();
         }
@@ -343,7 +452,48 @@ HTML_PAGE = """
             return fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) });
         }
 
+        // --- Transport: "Polling" (HTTP GET /screenshot + POST /input/*, the
+        // original design) vs "WebSocket" (one persistent connection pushing
+        // binary frames and carrying input as JSON messages). Both stay fully
+        // implemented; a dropdown picks which one is active. sendInput() is
+        // the single call site the gesture/keyboard code below goes through,
+        // so it doesn't need to know which transport is live.
+        let transportMode = 'poll';
+        let ws = null;
+        let wsFrameUrl = null; // current blob: URL backing the <img>, for revocation
+
+        function sendInput(type, body) {
+            if (transportMode === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(Object.assign({ type }, body)));
+                return Promise.resolve();
+            }
+            return post('/input/' + type, body);
+        }
+
+        function connectWS() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN);
+            ws.binaryType = 'blob';
+            ws.onmessage = (evt) => {
+                if (!(evt.data instanceof Blob)) return;
+                const url = URL.createObjectURL(evt.data);
+                const previous = wsFrameUrl;
+                wsFrameUrl = url;
+                img.src = url;
+                if (previous) URL.revokeObjectURL(previous);
+            };
+            ws.onclose = () => { if (transportMode === 'ws') ws = null; };
+        }
+
+        function disconnectWS() {
+            if (ws) { ws.onclose = null; ws.close(); ws = null; }
+            if (wsFrameUrl) { URL.revokeObjectURL(wsFrameUrl); wsFrameUrl = null; }
+        }
+
         function refreshScreen() {
+            // No-op in WebSocket mode — frames already arrive on a push
+            // timer, so this HTTP fetch would just be a redundant one.
+            if (transportMode !== 'poll') return;
             const next = new Image();
             next.onload = () => { img.src = next.src; };
             next.src = '/screenshot?token=' + TOKEN + '&t=' + Date.now();
@@ -443,7 +593,7 @@ HTML_PAGE = """
             } else if (activePointers.size === 2) {
                 if (gestureMode === 'mouse' && mouseDownSent) {
                     // Cancel the in-progress drag before switching to pinch.
-                    flushMouseMove().then(() => post('/input/mouseup', { button: rightClickMode ? 'right' : 'left' }));
+                    flushMouseMove().then(() => sendInput('mouseup', { button: rightClickMode ? 'right' : 'left' }));
                 }
                 mouseDownSent = false;
                 gestureMode = 'pinch';
@@ -464,7 +614,7 @@ HTML_PAGE = """
                     // Movement past the tap tolerance — commit to a drag: press
                     // down at the original touch point first, then move to here.
                     const down = toMacCoords(mouseDownPos.x, mouseDownPos.y);
-                    post('/input/mousedown', { x: down.x, y: down.y, button: rightClickMode ? 'right' : 'left' });
+                    sendInput('mousedown', { x: down.x, y: down.y, button: rightClickMode ? 'right' : 'left' });
                     mouseDownSent = true;
                 }
                 const { x, y } = toMacCoords(off.x, off.y);
@@ -483,14 +633,14 @@ HTML_PAGE = """
                 const button = rightClickMode ? 'right' : 'left';
                 if (mouseDownSent) {
                     flushMouseMove()
-                        .then(() => post('/input/mouseup', { button }))
+                        .then(() => sendInput('mouseup', { button }))
                         .then(() => setTimeout(refreshScreen, 200));
                 } else {
                     // Never moved past the tap threshold — resolve as a plain
                     // click (down+up together) at the touch point.
                     const { x, y } = toMacCoords(mouseDownPos.x, mouseDownPos.y);
-                    post('/input/mousedown', { x, y, button })
-                        .then(() => post('/input/mouseup', { button }))
+                    sendInput('mousedown', { x, y, button })
+                        .then(() => sendInput('mouseup', { button }))
                         .then(() => setTimeout(refreshScreen, 200));
                 }
                 mouseDownSent = false;
@@ -509,7 +659,7 @@ HTML_PAGE = """
 
         screenWrap.addEventListener('wheel', (e) => {
             e.preventDefault();
-            post('/input/scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
+            sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
         }, { passive: false });
 
         document.getElementById('rightClickToggle').addEventListener('click', (e) => {
@@ -518,6 +668,16 @@ HTML_PAGE = """
         });
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
+
+        document.getElementById('transportMode').addEventListener('change', (e) => {
+            transportMode = e.target.value;
+            if (transportMode === 'ws') {
+                connectWS();
+            } else {
+                disconnectWS();
+                refreshScreen(); // get a frame now instead of waiting for the next poll tick
+            }
+        });
 
         const fullscreenBtn = document.getElementById('fullscreenBtn');
         async function toggleFullscreen() {
@@ -545,14 +705,14 @@ HTML_PAGE = """
 
         document.querySelectorAll('#controls button[data-key]').forEach(btn => {
             btn.addEventListener('click', () => {
-                post('/input/key', { key: btn.dataset.key }).then(() => setTimeout(refreshScreen, 150));
+                sendInput('key', { key: btn.dataset.key }).then(() => setTimeout(refreshScreen, 150));
             });
         });
 
         document.getElementById('sendText').addEventListener('click', () => {
             const input = document.getElementById('textInput');
             if (!input.value) return;
-            post('/input/text', { text: input.value }).then(() => {
+            sendInput('text', { text: input.value }).then(() => {
                 input.value = '';
                 setTimeout(refreshScreen, 150);
             });
