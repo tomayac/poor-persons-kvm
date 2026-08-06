@@ -235,8 +235,12 @@ def resolve_button(name):
 # "Polling" transport) and the /ws message loop (for "WebSocket" transport),
 # so the two transports can't drift in behavior.
 
-def do_mousedown(x, y, button):
-    pag(pyautogui.moveTo, x, y)
+def do_mousedown(button, x=None, y=None):
+    # x/y are optional: the Left/Right Click buttons press wherever the
+    # cursor already is (positioned by prior mousemove calls) rather than
+    # moving it — pyautogui.mouseDown() presses at the current OS position.
+    if x is not None and y is not None:
+        pag(pyautogui.moveTo, x, y)
     pag(pyautogui.mouseDown, button=resolve_button(button))
 
 
@@ -272,9 +276,7 @@ def dispatch_input(data):
     """Run one input event dict (as sent over /ws) against the shared handlers."""
     kind = data.get("type")
     if kind == "mousedown":
-        x, y = data.get("x"), data.get("y")
-        if x is not None and y is not None:
-            do_mousedown(x, y, data.get("button", "left"))
+        do_mousedown(data.get("button", "left"), data.get("x"), data.get("y"))
     elif kind == "mousemove":
         x, y = data.get("x"), data.get("y")
         if x is not None and y is not None:
@@ -294,10 +296,7 @@ def dispatch_input(data):
 @app.route("/input/mousedown", methods=["POST"])
 def mousedown():
     data = request.json or {}
-    x, y = data.get("x"), data.get("y")
-    if x is None or y is None:
-        abort(400)
-    do_mousedown(x, y, data.get("button", "left"))
+    do_mousedown(data.get("button", "left"), data.get("x"), data.get("y"))
     return jsonify({"status": "ok"})
 
 
@@ -432,18 +431,36 @@ HTML_PAGE = """
         #staleOverlay.active { opacity: 1; pointer-events: auto; }
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
-        body.compact #topbar {
-            position: fixed; top: 6px; right: 6px; left: auto; background: rgba(0,0,0,0.55);
-            padding: 4px 6px; border-radius: 8px; z-index: 20;
-        }
-        body.compact #topbar b, body.compact #topbar #status,
-        body.compact #topbar #rightClickToggle, body.compact #topbar #resetZoom,
-        body.compact #topbar #transportMode { display: none; }
-        body.compact #textRow, body.compact #controls { display: none; }
+        body.compact #topbar, body.compact #textRow, body.compact #controls,
+        body.compact #clickRow { display: none; }
         #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111; }
+        @media (min-width: 600px) {
+            /* Wide viewports (tablets, unfolded foldables, desktop) get the
+               whole row on one line instead of wrapping; overflow-x is a
+               safety net in case it still doesn't quite fit. */
+            #controls { flex-wrap: nowrap; overflow-x: auto; }
+        }
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
         button.active { background: #2a63c9; border-color: #2a63c9; }
+        #arrowGroup {
+            display: inline-grid;
+            grid-template-areas: ".    up    ." "left down right";
+            grid-template-columns: repeat(3, 1fr);
+            gap: 4px;
+            flex-shrink: 0;
+        }
+        #arrowGroup button { padding: 8px; min-width: 40px; }
+        .arrow-up { grid-area: up; }
+        .arrow-left { grid-area: left; }
+        .arrow-down { grid-area: down; }
+        .arrow-right { grid-area: right; }
+        #clickRow { display: flex; gap: 8px; padding: 8px; background: #111; }
+        #clickRow button {
+            flex: 1; padding: 16px; font-size: 15px; font-weight: 600;
+            touch-action: none; user-select: none; -webkit-user-select: none;
+        }
+        #clickRow button.held { background: #2a63c9; border-color: #2a63c9; }
         #textRow { display: flex; gap: 6px; padding: 8px; background: #111; }
         #textInput { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #555; background: #222; color: #eee; font-size: 14px; }
     </style>
@@ -456,7 +473,8 @@ HTML_PAGE = """
             <option value="poll">Polling</option>
             <option value="ws" selected>WebSocket</option>
         </select>
-        <button id="rightClickToggle">Right-click mode</button>
+        <button id="zoomOutBtn">Zoom −</button>
+        <button id="zoomInBtn">Zoom +</button>
         <button id="resetZoom">Reset Zoom</button>
         <button id="fullscreenBtn">Fullscreen</button>
     </div>
@@ -474,6 +492,10 @@ HTML_PAGE = """
             <span id="staleAge"></span>
         </div>
     </div>
+    <div id="clickRow">
+        <button id="leftClickBtn">Left Click</button>
+        <button id="rightClickBtn">Right Click</button>
+    </div>
     <div id="textRow">
         <input id="textInput" type="text" placeholder="Type here, then Send">
         <button id="sendText">Send</button>
@@ -483,10 +505,12 @@ HTML_PAGE = """
         <button data-key="backspace">Backspace</button>
         <button data-key="tab">Tab</button>
         <button data-key="escape">Esc</button>
-        <button data-key="up">&uarr;</button>
-        <button data-key="down">&darr;</button>
-        <button data-key="left">&larr;</button>
-        <button data-key="right">&rarr;</button>
+        <div id="arrowGroup">
+            <button class="arrow-up" data-key="up">&uarr;</button>
+            <button class="arrow-left" data-key="left">&larr;</button>
+            <button class="arrow-down" data-key="down">&darr;</button>
+            <button class="arrow-right" data-key="right">&rarr;</button>
+        </div>
         <button data-key="cmd+c">Cmd+C</button>
         <button data-key="cmd+v">Cmd+V</button>
         <button data-key="cmd+z">Cmd+Z</button>
@@ -520,7 +544,14 @@ HTML_PAGE = """
         const statusEl = document.getElementById('status');
         const staleOverlay = document.getElementById('staleOverlay');
         const staleAgeEl = document.getElementById('staleAge');
-        let rightClickMode = false;
+        // Left/Right Click buttons hold the actual mouse button down for as
+        // long as they're pressed; moving a finger on the screen only ever
+        // moves the pointer, never clicks. This is the whole fix for
+        // accidental selection: there's no movement-distance heuristic
+        // guessing "was that a tap or a drag" anymore, because movement
+        // alone never triggers a click in the first place.
+        let leftHeld = false;
+        let rightHeld = false;
 
         // Frame staleness has two distinct failure modes, and arrival time
         // alone only catches one of them:
@@ -573,20 +604,11 @@ HTML_PAGE = """
         // bubbles up to screenWrap's own pointer handlers underneath.
         staleOverlay.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); });
 
-        // 'idle' -> no pointers down. 'mouse' -> single pointer driving the
-        // remote mouse. 'pinch' -> two pointers zooming/panning the view.
+        // 'idle' -> no pointers down. 'mouse' -> single pointer moving the
+        // remote cursor. 'pinch' -> two pointers zooming/panning the view.
         let gestureMode = 'idle';
         let mousePointerId = null;
         const activePointers = new Map(); // pointerId -> {x, y} in client coords
-
-        // A touch only becomes a "press" (mousedown sent to the Mac) once it
-        // moves past this distance — otherwise every tiny finger tremor during
-        // a tap would register as a click-and-drag and select whatever text
-        // is under the path. Below the threshold we buffer the down position
-        // and only resolve it as a click (down+up together) or a drag on release/commit.
-        const DRAG_THRESHOLD = 8;
-        let mouseDownSent = false;
-        let mouseDownPos = null; // offset coords of the buffered pointerdown
 
         // Raw pointermove fires far faster (60-120/sec on a touchscreen) than
         // it's useful to relay over the network — each send is a real
@@ -728,7 +750,12 @@ HTML_PAGE = """
             cursorDot.style.left = (offsetClientX - rect.left) + 'px';
             cursorDot.style.top = (offsetClientY - rect.top) + 'px';
             cursorDot.style.opacity = '1';
-            cursorDot.classList.toggle('right', rightClickMode);
+            updateCursorHeldVisual();
+        }
+
+        function updateCursorHeldVisual() {
+            cursorDot.classList.toggle('right', rightHeld);
+            cursorDot.classList.toggle('down', leftHeld || rightHeld);
         }
 
         function applyTransform() {
@@ -747,6 +774,21 @@ HTML_PAGE = """
 
         function resetZoom() {
             scale = 1; panX = 0; panY = 0;
+            applyTransform();
+        }
+
+        const ZOOM_STEP = 1.25;
+        function zoomBy(factor) {
+            // Same anchor-preserving math as pinch-zoom (see updatePinch),
+            // just anchored to the viewport center instead of a pinch midpoint.
+            const wrapRect = screenWrap.getBoundingClientRect();
+            const center = { x: wrapRect.width / 2, y: wrapRect.height / 2 };
+            const anchor = { x: (center.x - panX) / scale, y: (center.y - panY) / scale };
+            const newScale = clamp(scale * factor, 1, 6);
+            scale = newScale;
+            panX = center.x - anchor.x * newScale;
+            panY = center.y - anchor.y * newScale;
+            clampPan();
             applyTransform();
         }
 
@@ -786,17 +828,11 @@ HTML_PAGE = """
             if (activePointers.size === 1) {
                 gestureMode = 'mouse';
                 mousePointerId = e.pointerId;
-                mouseDownSent = false;
-                mouseDownPos = offsetPoint(e.clientX, e.clientY);
-                updateCursorDot(mouseDownPos.x, mouseDownPos.y);
-                cursorDot.classList.add('down');
-                // Buffered: no mousedown sent to the Mac yet — see pointermove.
+                const off = offsetPoint(e.clientX, e.clientY);
+                updateCursorDot(off.x, off.y);
+                const { x, y } = toMacCoords(off.x, off.y);
+                sendInput('mousemove', { x, y }); // instant on first touch, not throttled
             } else if (activePointers.size === 2) {
-                if (gestureMode === 'mouse' && mouseDownSent) {
-                    // Cancel the in-progress drag before switching to pinch.
-                    flushMouseMove().then(() => sendInput('mouseup', { button: rightClickMode ? 'right' : 'left' }));
-                }
-                mouseDownSent = false;
                 gestureMode = 'pinch';
                 startPinch();
             }
@@ -809,15 +845,6 @@ HTML_PAGE = """
             if (gestureMode === 'mouse' && e.pointerId === mousePointerId) {
                 const off = offsetPoint(e.clientX, e.clientY);
                 updateCursorDot(off.x, off.y);
-
-                if (!mouseDownSent) {
-                    if (dist(off, mouseDownPos) < DRAG_THRESHOLD) return;
-                    // Movement past the tap tolerance — commit to a drag: press
-                    // down at the original touch point first, then move to here.
-                    const down = toMacCoords(mouseDownPos.x, mouseDownPos.y);
-                    sendInput('mousedown', { x: down.x, y: down.y, button: rightClickMode ? 'right' : 'left' });
-                    mouseDownSent = true;
-                }
                 const { x, y } = toMacCoords(off.x, off.y);
                 sendMouseMoveThrottled(x, y);
             } else if (gestureMode === 'pinch' && activePointers.size === 2) {
@@ -829,24 +856,7 @@ HTML_PAGE = """
             const wasMouse = gestureMode === 'mouse' && e.pointerId === mousePointerId;
             activePointers.delete(e.pointerId);
 
-            if (wasMouse) {
-                cursorDot.classList.remove('down');
-                const button = rightClickMode ? 'right' : 'left';
-                if (mouseDownSent) {
-                    flushMouseMove()
-                        .then(() => sendInput('mouseup', { button }))
-                        .then(() => setTimeout(refreshScreen, 200));
-                } else {
-                    // Never moved past the tap threshold — resolve as a plain
-                    // click (down+up together) at the touch point.
-                    const { x, y } = toMacCoords(mouseDownPos.x, mouseDownPos.y);
-                    sendInput('mousedown', { x, y, button })
-                        .then(() => sendInput('mouseup', { button }))
-                        .then(() => setTimeout(refreshScreen, 200));
-                }
-                mouseDownSent = false;
-                mouseDownPos = null;
-            }
+            if (wasMouse) flushMouseMove();
             if (activePointers.size < 2) {
                 pinchStart = null;
             }
@@ -863,12 +873,38 @@ HTML_PAGE = """
             sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
         }, { passive: false });
 
-        document.getElementById('rightClickToggle').addEventListener('click', (e) => {
-            rightClickMode = !rightClickMode;
-            e.target.classList.toggle('active', rightClickMode);
-        });
+        // Left/Right Click buttons: press-and-hold sends mousedown and keeps
+        // the button down on the Mac side until released, exactly like a
+        // real mouse button. Combined with screenWrap only ever moving the
+        // pointer, holding one of these while dragging a finger on the
+        // screen is what lets you select text or drag-scroll.
+        function bindClickButton(btnId, button) {
+            const btn = document.getElementById(btnId);
+            function setHeld(held) {
+                if (button === 'left') leftHeld = held; else rightHeld = held;
+                btn.classList.toggle('held', held);
+                updateCursorHeldVisual();
+            }
+            btn.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                try { btn.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+                setHeld(true);
+                sendInput('mousedown', { button });
+            });
+            function release() {
+                if (!(button === 'left' ? leftHeld : rightHeld)) return;
+                setHeld(false);
+                sendInput('mouseup', { button }).then(() => setTimeout(refreshScreen, 200));
+            }
+            btn.addEventListener('pointerup', release);
+            btn.addEventListener('pointercancel', release);
+        }
+        bindClickButton('leftClickBtn', 'left');
+        bindClickButton('rightClickBtn', 'right');
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
+        document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(ZOOM_STEP));
+        document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
 
         document.getElementById('transportMode').addEventListener('change', (e) => {
             transportMode = e.target.value;
