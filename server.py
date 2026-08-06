@@ -430,8 +430,8 @@ HTML_PAGE = """
         <b>Poor Person's KVM</b>
         <span id="status">connecting...</span>
         <select id="transportMode">
-            <option value="poll" selected>Polling</option>
-            <option value="ws">WebSocket</option>
+            <option value="poll">Polling</option>
+            <option value="ws" selected>WebSocket</option>
         </select>
         <button id="rightClickToggle">Right-click mode</button>
         <button id="resetZoom">Reset Zoom</button>
@@ -560,7 +560,7 @@ HTML_PAGE = """
         // implemented; a dropdown picks which one is active. sendInput() is
         // the single call site the gesture/keyboard code below goes through,
         // so it doesn't need to know which transport is live.
-        let transportMode = 'poll';
+        let transportMode = 'ws';
         let ws = null;
         let wsFrameUrl = null; // current blob: URL backing the <img>, for revocation
 
@@ -840,6 +840,7 @@ HTML_PAGE = """
         pollHealth();
         setInterval(pollHealth, 5000);
         setInterval(refreshScreen, 1500);
+        if (transportMode === 'ws') connectWS();
     </script>
 </body>
 </html>
