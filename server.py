@@ -350,14 +350,22 @@ def ws_handler(ws):
     """One WebSocket connection: pushes binary frames on a timer while
     reading JSON input events off the same connection, replacing the
     HTTP polling / POST round trips with a single persistent connection.
+
+    Also answers {"type": "ping", "t": ...} with a pong echoing t back
+    unchanged, so the client can measure round-trip latency using only its
+    own clock (see the matching comment in HTML_PAGE's checkStale()) — this
+    is how the client detects a connection that's backed up but still
+    trickling frames through, not just one that's gone fully silent.
     """
     stop = threading.Event()
+    send_lock = threading.Lock()  # ws.send() isn't safe to call from two threads at once
 
     def frame_sender():
         while not stop.is_set():
             try:
                 data, _mimetype = capture_frame_bytes()
-                ws.send(data)
+                with send_lock:
+                    ws.send(data)
             except Exception:
                 break
             stop.wait(WS_FRAME_INTERVAL)
@@ -370,9 +378,14 @@ def ws_handler(ws):
             if msg is None:
                 break
             try:
-                dispatch_input(json.loads(msg))
+                data = json.loads(msg)
+                if data.get("type") == "ping":
+                    with send_lock:
+                        ws.send(json.dumps({"type": "pong", "t": data.get("t")}))
+                else:
+                    dispatch_input(data)
             except Exception:
-                pass  # malformed/failed input event — drop it, keep the connection alive
+                pass  # malformed/failed message — drop it, keep the connection alive
     finally:
         stop.set()
         sender.join(timeout=1)
@@ -388,6 +401,7 @@ HTML_PAGE = """
     <link rel="manifest" href="/manifest.json?token=TOKEN_PLACEHOLDER">
     <link rel="icon" type="image/png" href="/static/icon-192.png?token=TOKEN_PLACEHOLDER">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?token=TOKEN_PLACEHOLDER">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="KVM">
@@ -409,6 +423,15 @@ HTML_PAGE = """
         #cursorDot path { fill: #fff; stroke: #000; stroke-width: 1.2; stroke-linejoin: round; }
         #cursorDot.right path { fill: #6cb2ff; }
         #cursorDot.down { transform: scale(0.9); }
+        #staleOverlay {
+            position: absolute; inset: 0; background: rgba(0,0,0,0.55);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 6px; color: #fff; text-align: center; padding: 20px; z-index: 15;
+            opacity: 0; pointer-events: none; transition: opacity 0.2s;
+        }
+        #staleOverlay.active { opacity: 1; pointer-events: auto; }
+        #staleOverlay b { font-size: 15px; }
+        #staleOverlay span { font-size: 13px; color: #ccc; }
         body.compact #topbar {
             position: fixed; top: 6px; right: 6px; left: auto; background: rgba(0,0,0,0.55);
             padding: 4px 6px; border-radius: 8px; z-index: 20;
@@ -445,6 +468,10 @@ HTML_PAGE = """
             <svg width="24" height="34" viewBox="0 0 20 28">
                 <path d="M0,0 L0,20 L5,15.5 L8.5,23 L11.5,21.5 L8,14 L14,14 Z"/>
             </svg>
+        </div>
+        <div id="staleOverlay">
+            <b>⚠ Connection is slow</b>
+            <span id="staleAge"></span>
         </div>
     </div>
     <div id="textRow">
@@ -491,7 +518,60 @@ HTML_PAGE = """
         const screenWrap = document.getElementById('screenWrap');
         const cursorDot = document.getElementById('cursorDot');
         const statusEl = document.getElementById('status');
+        const staleOverlay = document.getElementById('staleOverlay');
+        const staleAgeEl = document.getElementById('staleAge');
         let rightClickMode = false;
+
+        // Frame staleness has two distinct failure modes, and arrival time
+        // alone only catches one of them:
+        //   1. Nothing has arrived in a while (dead connection, backgrounded
+        //      tab) — caught by lastFrameTime below.
+        //   2. Frames/pongs ARE still arriving on schedule, but each one took
+        //      a long time in transit (a backed-up/bufferbloated pipe) — a
+        //      frame that lands "now" may have been captured long ago. This
+        //      needs round-trip time, not arrival time, to detect.
+        // RTT could be measured by having the server stamp each frame with
+        // its capture time, but that requires the client and server clocks
+        // to agree, which we can't assume (especially once this travels over
+        // the internet). Instead: measure RTT entirely with the client's own
+        // clock via a small ping/pong exchange over the same transport (see
+        // /ws's ping handling server-side) — zero clock-sync needed. Polling
+        // gets this for free from the natural request/response timing of
+        // each screenshot fetch.
+        // Thresholds sit well above either transport's normal cadence (WS
+        // pushes every ~350ms, polling every 1.5s, pings every 1s) so normal
+        // jitter never triggers this, only a genuine stall or backlog.
+        const STALE_GAP_MS = 3000;
+        const STALE_RTT_MS = 1500;
+        const PING_INTERVAL_MS = 1000;
+        let lastFrameTime = Date.now();
+        let lastRTT = 0;
+
+        function markFreshFrame() {
+            lastFrameTime = Date.now();
+        }
+
+        function markRTT(rttMs) {
+            lastFrameTime = Date.now();
+            lastRTT = rttMs;
+        }
+
+        function checkStale() {
+            const age = Date.now() - lastFrameTime;
+            const isStale = age > STALE_GAP_MS || lastRTT > STALE_RTT_MS;
+            staleOverlay.classList.toggle('active', isStale);
+            if (isStale) {
+                staleAgeEl.textContent = age > STALE_GAP_MS
+                    ? 'Last update ' + Math.floor(age / 1000) + 's ago'
+                    : 'Round-trip ' + Math.round(lastRTT) + 'ms';
+            }
+        }
+        setInterval(checkStale, 500);
+
+        // The overlay only becomes click-through when .active (see CSS), but
+        // stop the event here too so a click landing on it while stale never
+        // bubbles up to screenWrap's own pointer handlers underneath.
+        staleOverlay.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); });
 
         // 'idle' -> no pointers down. 'mouse' -> single pointer driving the
         // remote mouse. 'pinch' -> two pointers zooming/panning the view.
@@ -572,22 +652,37 @@ HTML_PAGE = """
             return post('/input/' + type, body);
         }
 
+        let wsPingTimer = null;
+
         function connectWS() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN);
             ws.binaryType = 'blob';
             ws.onmessage = (evt) => {
-                if (!(evt.data instanceof Blob)) return;
-                const url = URL.createObjectURL(evt.data);
-                const previous = wsFrameUrl;
-                wsFrameUrl = url;
-                img.src = url;
-                if (previous) URL.revokeObjectURL(previous);
+                if (evt.data instanceof Blob) {
+                    markFreshFrame();
+                    const url = URL.createObjectURL(evt.data);
+                    const previous = wsFrameUrl;
+                    wsFrameUrl = url;
+                    img.src = url;
+                    if (previous) URL.revokeObjectURL(previous);
+                    return;
+                }
+                try {
+                    const msg = JSON.parse(evt.data);
+                    if (msg.type === 'pong') markRTT(performance.now() - msg.t);
+                } catch (e) { /* ignore */ }
             };
             ws.onclose = () => { if (transportMode === 'ws') ws = null; };
+            wsPingTimer = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping', t: performance.now() }));
+                }
+            }, PING_INTERVAL_MS);
         }
 
         function disconnectWS() {
+            if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
             if (ws) { ws.onclose = null; ws.close(); ws = null; }
             if (wsFrameUrl) { URL.revokeObjectURL(wsFrameUrl); wsFrameUrl = null; }
         }
@@ -596,8 +691,12 @@ HTML_PAGE = """
             // No-op in WebSocket mode — frames already arrive on a push
             // timer, so this HTTP fetch would just be a redundant one.
             if (transportMode !== 'poll') return;
+            const sentAt = performance.now();
             const next = new Image();
-            next.onload = () => { img.src = next.src; };
+            next.onload = () => {
+                img.src = next.src;
+                markRTT(performance.now() - sentAt);
+            };
             next.src = '/screenshot?token=' + TOKEN + '&t=' + Date.now();
         }
 
@@ -773,6 +872,10 @@ HTML_PAGE = """
 
         document.getElementById('transportMode').addEventListener('change', (e) => {
             transportMode = e.target.value;
+            // Grace period so switching transports doesn't itself flash the
+            // stale overlay while the new connection/poll is still spinning up.
+            lastFrameTime = Date.now();
+            lastRTT = 0;
             if (transportMode === 'ws') {
                 connectWS();
             } else {
