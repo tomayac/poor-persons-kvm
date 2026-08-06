@@ -365,6 +365,25 @@ def do_mouseup(button):
     pag(_post_mouse_event, up_type, pos, btn_const, count)
 
 
+def do_doubleclick(button):
+    # A dedicated action rather than relying on two fast taps of the
+    # Left/Right Click buttons reliably landing within DOUBLE_CLICK_INTERVAL
+    # of each other — on a real device, each tap is a separate network round
+    # trip (POST or WS message), and real-world latency/jitter makes that
+    # timing far less predictable than it looked in local testing. Doing
+    # both clicks here, back to back with no network gap between them,
+    # sidesteps the timing question entirely.
+    pos = tuple(pyautogui.position())
+    button = resolve_button(button)
+    down_type, up_type, btn_const = _MOUSE_EVENT_TYPES[button]
+    for count in (1, 2):
+        pag(_post_mouse_event, down_type, pos, btn_const, count)
+        pag(_post_mouse_event, up_type, pos, btn_const, count)
+        _click_state.update(time=time.time(), pos=pos, button=button, count=count)
+        if count == 1:
+            time.sleep(0.05)
+
+
 def do_scroll(dx, dy):
     if dy:
         pag(pyautogui.scroll, -dy)
@@ -396,6 +415,8 @@ def dispatch_input(data):
             do_mousemove(x, y)
     elif kind == "mouseup":
         do_mouseup(data.get("button", "left"))
+    elif kind == "doubleclick":
+        do_doubleclick(data.get("button", "left"))
     elif kind == "scroll":
         do_scroll(int(data.get("dx", 0)), int(data.get("dy", 0)))
     elif kind == "text":
@@ -427,6 +448,13 @@ def mousemove():
 def mouseup():
     data = request.json or {}
     do_mouseup(data.get("button", "left"))
+    return jsonify({"status": "ok"})
+
+
+@app.route("/input/doubleclick", methods=["POST"])
+def doubleclick():
+    data = request.json or {}
+    do_doubleclick(data.get("button", "left"))
     return jsonify({"status": "ok"})
 
 
@@ -652,26 +680,16 @@ HTML_PAGE = """
                actual last element in normal flow, not body. */
             padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
             /* Same width capping as #topbar — full width up to a real
-               device's width, centered beyond that. Buttons stay their
-               natural size here (only the top bar's are asked to stretch). */
+               device's width, centered beyond that. Its buttons grow to
+               fill it, same as the top bar's (below). */
             width: 100%; max-width: 851px; margin-left: auto; margin-right: auto;
         }
+        #controls > button { flex: 1 1 auto; }
         @media (min-width: 600px) {
             /* Wide viewports (tablets, unfolded foldables, desktop) get the
                whole row on one line instead of wrapping; overflow-x is a
                safety net in case it still doesn't quite fit. */
             #controls { flex-wrap: nowrap; overflow-x: auto; }
-        }
-        @media (min-width: 800px) {
-            /* Once there's comfortably more room than the buttons need
-               (measured content width is ~741px), spread them across the
-               full bar instead of leaving one dead gap after the last
-               button. Kept above 600px's breakpoint and short of exactly
-               matching the content width on purpose: combining
-               justify-content with overflow-x:auto when content might
-               still be overflowing can make the scrollable range start
-               from a confusing offset instead of the natural left edge. */
-            #controls { justify-content: space-between; }
         }
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
@@ -681,7 +699,10 @@ HTML_PAGE = """
             grid-template-areas: ".    up    ." "left down right";
             grid-template-columns: repeat(3, 1fr);
             gap: 4px;
-            flex-shrink: 0;
+            /* Grows like the surrounding buttons, but doesn't shrink below
+               its natural cluster size — unlike a plain text button, its
+               grid track sizing doesn't have an obvious safe minimum. */
+            flex: 1 0 auto;
         }
         #arrowGroup button { padding: 8px; min-width: 40px; }
         .arrow-up { grid-area: up; }
@@ -745,6 +766,7 @@ HTML_PAGE = """
     <div id="clickRow">
         <button id="leftClickBtn">Left Click</button>
         <button id="rightClickBtn">Right Click</button>
+        <button id="doubleClickBtn">Double Click</button>
     </div>
     <div id="textRow">
         <input id="textInput" type="text" placeholder="Type here, then Send">
@@ -1218,6 +1240,9 @@ HTML_PAGE = """
         }
         bindClickButton('leftClickBtn', 'left');
         bindClickButton('rightClickBtn', 'right');
+        document.getElementById('doubleClickBtn').addEventListener('click', () => {
+            sendInput('doubleclick', { button: 'left' }).then(() => setTimeout(refreshScreen, 200));
+        });
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
 
