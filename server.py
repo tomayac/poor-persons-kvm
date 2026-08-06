@@ -113,7 +113,19 @@ def unauthorized(_e):
 
 @app.route("/")
 def index():
-    return Response(HTML_PAGE.replace("TOKEN_PLACEHOLDER", AUTH_TOKEN), mimetype="text/html")
+    # pyautogui.size() just queries display info (no capture involved) — a
+    # few ms, not the ~1-2s a screenshot costs — so it's fine to call on
+    # every page load. Baking the real aspect ratio into the CSS lets the
+    # browser reserve #screenWrap's correct height before the first frame
+    # ever arrives, instead of it collapsing to ~0 and then jumping once an
+    # image with real dimensions finally loads.
+    try:
+        screen_w, screen_h = pyautogui.size()
+        aspect_ratio = f"{screen_w} / {screen_h}"
+    except Exception:
+        aspect_ratio = "16 / 9"
+    html = HTML_PAGE.replace("TOKEN_PLACEHOLDER", AUTH_TOKEN).replace("SCREEN_ASPECT_PLACEHOLDER", aspect_ratio)
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/manifest.json")
@@ -435,7 +447,7 @@ HTML_PAGE = """
 <html>
 <head>
     <title>Poor Person's KVM</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#1a1a1a">
     <link rel="manifest" href="/manifest.json?token=TOKEN_PLACEHOLDER">
     <link rel="icon" type="image/png" href="/static/icon-192.png?token=TOKEN_PLACEHOLDER">
@@ -446,20 +458,33 @@ HTML_PAGE = """
     <meta name="apple-mobile-web-app-title" content="KVM">
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif; }
-        #topbar { display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap; }
+        body {
+            margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif;
+            /* Requires viewport-fit=cover above, or these always read 0. Keeps
+               content out of Android's gesture-nav bar and iOS's notch/home
+               indicator when running edge-to-edge (standalone PWA, fullscreen).
+               The 0px fallback is a no-op on devices/orientations with no inset. */
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
+        #topbar { position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap; }
         #topbar span#status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
         #topbar span#status.ok { background: #1e7e34; }
         #topbar span#status.bad { background: #a11; }
         #settingsPanel {
-            display: none; gap: 16px; padding: 10px 8px; background: #181818;
-            border-top: 1px solid #333; flex-wrap: wrap; align-items: center;
+            display: none; position: absolute; top: 100%; right: 8px; margin-top: 4px;
+            flex-direction: column; gap: 10px; padding: 12px; min-width: 220px;
+            background: #181818; border: 1px solid #333; border-radius: 8px;
+            box-shadow: 0 6px 16px rgba(0,0,0,0.5); z-index: 30;
         }
         #settingsPanel.open { display: flex; }
-        #settingsPanel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #ccc; }
+        #settingsPanel label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: #ccc; }
         #screenWrap { position: relative; touch-action: none; overflow: hidden; }
         #zoomLayer { transform-origin: 0 0; will-change: transform; }
-        #screen { width: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+        #screen {
+            width: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none;
+            aspect-ratio: SCREEN_ASPECT_PLACEHOLDER; background: #000;
+        }
         #cursorDot {
             position: absolute; top: 0; left: 0; width: 24px; height: 34px;
             pointer-events: none; opacity: 0; z-index: 10;
@@ -478,7 +503,7 @@ HTML_PAGE = """
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
         body.compact #topbar, body.compact #textRow, body.compact #controls,
-        body.compact #clickRow, body.compact #settingsPanel { display: none; }
+        body.compact #clickRow { display: none; }
         #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111; }
         @media (min-width: 600px) {
             /* Wide viewports (tablets, unfolded foldables, desktop) get the
@@ -520,20 +545,20 @@ HTML_PAGE = """
         <button id="resetZoom">Reset Zoom</button>
         <button id="fullscreenBtn">Fullscreen</button>
         <button id="settingsBtn">⚙ Settings</button>
-    </div>
-    <div id="settingsPanel">
-        <label>Transport
-            <select id="transportMode">
-                <option value="poll">Polling</option>
-                <option value="ws" selected>WebSocket</option>
-            </select>
-        </label>
-        <label>Refresh rate
-            <select id="rateMode">
-                <option value="optimal" selected>Optimal (fastest)</option>
-                <option value="slow">Slow</option>
-            </select>
-        </label>
+        <div id="settingsPanel">
+            <label>Transport
+                <select id="transportMode">
+                    <option value="poll">Polling</option>
+                    <option value="ws" selected>WebSocket</option>
+                </select>
+            </label>
+            <label>Refresh rate
+                <select id="rateMode">
+                    <option value="optimal" selected>Optimal (fastest)</option>
+                    <option value="slow">Slow</option>
+                </select>
+            </label>
+        </div>
     </div>
     <div id="screenWrap">
         <div id="zoomLayer">
