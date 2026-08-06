@@ -109,8 +109,68 @@ def check_auth():
         abort(401)
 
 
+LOGIN_SHELL_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Poor Person's KVM — Sign in</title>
+    <style>
+        body {
+            margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            background: #111; color: #eee; font-family: -apple-system, sans-serif;
+        }
+        form { display: flex; flex-direction: column; gap: 12px; width: min(90vw, 360px); }
+        input, button { padding: 10px 12px; border-radius: 6px; border: 1px solid #555; font-size: 15px; }
+        input { background: #222; color: #eee; }
+        button { background: #2a63c9; color: #fff; border-color: #2a63c9; }
+        p { color: #999; font-size: 13px; margin: 0; }
+    </style>
+</head>
+<body>
+    <form id="loginForm">
+        <b>Poor Person's KVM</b>
+        <input id="tokenField" placeholder="Access token (or paste the full URL)" autocomplete="off" autocapitalize="off">
+        <button type="submit">Connect</button>
+        <p>Find this in the terminal output where the server was started.</p>
+    </form>
+    <script>
+        (function () {
+            const params = new URLSearchParams(location.search);
+            if (params.get('token')) {
+                // A token was already tried (in the URL, or from a previous
+                // localStorage redirect below) and it still landed here —
+                // don't loop forever retrying the same bad value, just ask.
+                localStorage.removeItem('kvmToken');
+            } else {
+                const saved = localStorage.getItem('kvmToken');
+                if (saved) {
+                    location.replace('/?token=' + encodeURIComponent(saved));
+                    return;
+                }
+            }
+            document.getElementById('loginForm').addEventListener('submit', (e) => {
+                e.preventDefault();
+                let value = document.getElementById('tokenField').value.trim();
+                const m = value.match(/[?&]token=([^&]+)/);
+                if (m) value = decodeURIComponent(m[1]);
+                if (!value) return;
+                location.href = '/?token=' + encodeURIComponent(value);
+            });
+        })();
+    </script>
+</body>
+</html>
+"""
+
+
 @app.errorhandler(401)
 def unauthorized(_e):
+    # A plain fetch()/XHR call (all our /screenshot, /input/*, etc. routes)
+    # should keep getting a plain JSON 401. Only the page itself needs the
+    # login shell — that's what actually gets navigated to by the browser.
+    if request.path == "/":
+        return Response(LOGIN_SHELL_HTML, mimetype="text/html"), 401
     return jsonify({"error": "unauthorized"}), 401
 
 
@@ -749,6 +809,7 @@ HTML_PAGE = """
                     <option value="slow">Fixed interval</option>
                 </select>
             </label>
+            <button id="logoutBtn">Log Out</button>
             <!-- TEMP DEBUG: safe-area diagnostics, remove once the Android clipping issue is confirmed fixed -->
             <pre id="debugInfo"></pre>
         </div>
@@ -798,6 +859,11 @@ HTML_PAGE = """
 
     <script>
         const TOKEN = "TOKEN_PLACEHOLDER";
+        // Reaching this page at all means the server just accepted this
+        // token (the auth check runs before index() ever renders) — persist
+        // it so a future bare visit to "/" (no ?token= in the URL) can be
+        // auto-redirected by the login shell instead of asking again.
+        localStorage.setItem('kvmToken', TOKEN);
 
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js?token=' + TOKEN).catch(() => {});
@@ -1294,6 +1360,10 @@ HTML_PAGE = """
         document.getElementById('settingsBtn').addEventListener('click', () => {
             document.getElementById('settingsPanel').classList.toggle('open');
             updateDebugInfo();
+        });
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            localStorage.removeItem('kvmToken');
+            location.href = '/';
         });
         document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(ZOOM_STEP));
         document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));

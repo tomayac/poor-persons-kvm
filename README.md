@@ -30,6 +30,8 @@ The server prints a URL with an auth token, e.g. `http://192.168.x.x:5959/?token
 
 Set `KVM_TOKEN` in the environment to pin a fixed token across restarts (handy during development); otherwise a fresh random token is generated on every launch.
 
+The browser remembers the token in `localStorage` after a successful visit, so a later bare visit to the domain (no `?token=` in the URL) gets transparently redirected rather than rejected — "Log Out" in Settings clears it. This only actually persists across server restarts if `KVM_TOKEN` is pinned; otherwise the remembered token goes stale the same way a bookmarked URL would, and the sign-in page's field takes a fresh token (or a pasted full URL — it extracts `?token=` from either).
+
 ## Installing as an app
 
 The page is an installable PWA — on the phone's browser, use "Add to Home Screen" (iOS Safari share sheet) or the install prompt (Android Chrome). The installed icon's `start_url` bakes in the current auth token, so launching it opens straight into the app.
