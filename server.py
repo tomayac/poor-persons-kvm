@@ -479,6 +479,17 @@ HTML_PAGE = """
         }
         #settingsPanel.open { display: flex; }
         #settingsPanel label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: #ccc; }
+        /* TEMP DEBUG */
+        #debugInfo {
+            font-family: monospace; font-size: 10px; line-height: 1.5; color: #8f8;
+            white-space: pre-wrap; max-width: 280px; max-height: 220px; overflow-y: auto;
+            border-top: 1px solid #333; padding-top: 8px; margin: 0;
+        }
+        #safeAreaProbe {
+            position: fixed; visibility: hidden; pointer-events: none;
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
         #screenWrap { position: relative; touch-action: none; overflow: hidden; }
         #zoomLayer { transform-origin: 0 0; will-change: transform; }
         #screen {
@@ -558,18 +569,21 @@ HTML_PAGE = """
         <div id="settingsPanel">
             <label>Transport
                 <select id="transportMode">
-                    <option value="poll">Polling</option>
-                    <option value="ws" selected>WebSocket (optimal)</option>
+                    <option value="poll">Repeated requests</option>
+                    <option value="ws" selected>Persistent connection (optimal)</option>
                 </select>
             </label>
             <label>Refresh rate
                 <select id="rateMode">
-                    <option value="optimal" selected>Optimal (fastest)</option>
-                    <option value="slow">Slow</option>
+                    <option value="optimal" selected>Adapts to round-trip time (optimal)</option>
+                    <option value="slow">Fixed interval</option>
                 </select>
             </label>
+            <!-- TEMP DEBUG: safe-area diagnostics, remove once the Android clipping issue is confirmed fixed -->
+            <pre id="debugInfo"></pre>
         </div>
     </div>
+    <div id="safeAreaProbe"></div>
     <div id="screenWrap">
         <div id="zoomLayer">
             <img id="screen" src="/screenshot?token=TOKEN_PLACEHOLDER">
@@ -1042,8 +1056,41 @@ HTML_PAGE = """
         bindClickButton('rightClickBtn', 'right');
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
+
+        // TEMP DEBUG — remove this whole block once the Android safe-area
+        // clipping issue is confirmed fixed on a real device.
+        function updateDebugInfo() {
+            const probe = document.getElementById('safeAreaProbe');
+            const cs = getComputedStyle(probe);
+            const vv = window.visualViewport;
+            const controlsRect = document.getElementById('controls').getBoundingClientRect();
+            const clickRowRect = document.getElementById('clickRow').getBoundingClientRect();
+            const lines = [
+                `safe-area-inset: T=${cs.paddingTop} R=${cs.paddingRight} B=${cs.paddingBottom} L=${cs.paddingLeft}`,
+                `window.innerWidth/Height: ${window.innerWidth} / ${window.innerHeight}`,
+                `visualViewport w/h: ${vv ? Math.round(vv.width) : 'n/a'} / ${vv ? Math.round(vv.height) : 'n/a'}`,
+                `visualViewport offsetTop/Left: ${vv ? vv.offsetTop : 'n/a'} / ${vv ? vv.offsetLeft : 'n/a'}`,
+                `documentElement client W/H: ${document.documentElement.clientWidth} / ${document.documentElement.clientHeight}`,
+                `body scrollHeight: ${document.body.scrollHeight}`,
+                `devicePixelRatio: ${window.devicePixelRatio}`,
+                `display-mode standalone: ${window.matchMedia('(display-mode: standalone)').matches}`,
+                `fullscreenElement: ${!!document.fullscreenElement}`,
+                `body.compact: ${document.body.classList.contains('compact')}`,
+                `orientation: ${screen.orientation ? screen.orientation.type : 'n/a'}`,
+                `#controls rect: top=${Math.round(controlsRect.top)} bottom=${Math.round(controlsRect.bottom)}`,
+                `#controls fully visible: ${controlsRect.bottom <= window.innerHeight}`,
+                `#clickRow rect: top=${Math.round(clickRowRect.top)} bottom=${Math.round(clickRowRect.bottom)}`,
+            ];
+            document.getElementById('debugInfo').textContent = lines.join('\\n');
+        }
+        updateDebugInfo();
+        window.addEventListener('resize', updateDebugInfo);
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', updateDebugInfo);
+        screen.orientation && screen.orientation.addEventListener('change', updateDebugInfo);
+
         document.getElementById('settingsBtn').addEventListener('click', () => {
             document.getElementById('settingsPanel').classList.toggle('open');
+            updateDebugInfo();
         });
         document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(ZOOM_STEP));
         document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
