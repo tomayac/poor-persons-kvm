@@ -11,6 +11,7 @@ Permissions required (System Settings > Privacy & Security):
 Both are granted to whatever process runs this script (e.g. Terminal.app,
 iTerm, or python3 itself) — keep using the same terminal app each time.
 """
+import hashlib
 import hmac
 import io
 import json
@@ -18,8 +19,10 @@ import os
 import secrets
 import socket
 import threading
+import time
 
 import pyautogui
+import Quartz
 from flask import Flask, Response, abort, jsonify, request, send_file
 from flask_sock import Sock
 
@@ -222,8 +225,19 @@ def health():
         return jsonify({"screenshot_ok": False, "error": str(e)}), 500
 
 
-def capture_frame_bytes(prefer_speed=False):
-    """Capture one screenshot and encode it, shared by /screenshot and /ws.
+def frame_hash(img):
+    """Fast fixed-size fingerprint of the raw pixels, used to detect an
+    unchanged screen without depending on JPEG/AVIF encoders being
+    byte-for-byte deterministic (comparing encoded output directly would be
+    a bet on encoder internals we don't need to make)."""
+    return hashlib.blake2b(img.tobytes(), digest_size=16).hexdigest()
+
+
+def encode_frame(img, prefer_speed=False):
+    """Encode an already-captured screenshot — split out from capturing so
+    callers can hash the raw pixels first and skip encoding entirely when
+    the frame hasn't changed (see /screenshot's ETag handling and /ws's
+    frame_sender).
 
     AVIF compresses much smaller than JPEG (good for bandwidth), but on this
     machine encoding it costs ~500ms+ versus JPEG's ~15ms — measured
@@ -232,7 +246,6 @@ def capture_frame_bytes(prefer_speed=False):
     speed, so it uses JPEG; "slow" mode already isn't optimizing for
     latency, so it keeps AVIF for the smaller payload.
     """
-    img = take_screenshot()
     buf = io.BytesIO()
     if prefer_speed:
         img.convert("RGB").save(buf, "JPEG", quality=70)
@@ -252,14 +265,71 @@ def capture_frame_bytes(prefer_speed=False):
 @app.route("/screenshot")
 def screenshot():
     try:
-        data, mimetype = capture_frame_bytes(prefer_speed=request.args.get("rate") == "optimal")
+        img = take_screenshot()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    return send_file(io.BytesIO(data), mimetype=mimetype)
+
+    etag = frame_hash(img)
+    # Cache-Control: no-cache means "always ask the server first" (not "don't
+    # cache") — the browser sends If-None-Match on every poll, so an
+    # unchanged screen costs a small conditional request instead of a full
+    # image transfer + decode. Requires the client to stop cache-busting the
+    # URL with a timestamp, or every request looks like a different resource.
+    if request.headers.get("If-None-Match") == etag:
+        resp = Response(status=304)
+    else:
+        data, mimetype = encode_frame(img, prefer_speed=request.args.get("rate") == "optimal")
+        resp = send_file(io.BytesIO(data), mimetype=mimetype)
+    resp.headers["ETag"] = etag
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 def resolve_button(name):
     return name if name in ("left", "right", "middle") else "left"
+
+
+# pyautogui.mouseDown()/mouseUp() never set the CGEvent click-state field on
+# macOS, so the OS (and apps) see every click as click #1 — two separate,
+# genuinely fast down/up pairs still don't register as a double-click,
+# no matter how quickly they arrive. Fixed by posting the CGEvents
+# ourselves with that field set correctly, using the same timing+distance
+# heuristic real click hardware relies on for multi-click recognition.
+try:
+    from AppKit import NSEvent
+    DOUBLE_CLICK_INTERVAL = NSEvent.doubleClickInterval()
+except Exception:
+    DOUBLE_CLICK_INTERVAL = 0.5
+DOUBLE_CLICK_DISTANCE = 5  # px tolerance for "still the same spot"
+
+_MOUSE_EVENT_TYPES = {
+    "left": (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGMouseButtonLeft),
+    "right": (Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp, Quartz.kCGMouseButtonRight),
+    "middle": (Quartz.kCGEventOtherMouseDown, Quartz.kCGEventOtherMouseUp, Quartz.kCGMouseButtonCenter),
+}
+
+_click_state = {"time": 0.0, "pos": None, "button": None, "count": 0}
+
+
+def _next_click_count(pos, button):
+    now = time.time()
+    same_spot = (
+        _click_state["pos"] is not None
+        and abs(_click_state["pos"][0] - pos[0]) <= DOUBLE_CLICK_DISTANCE
+        and abs(_click_state["pos"][1] - pos[1]) <= DOUBLE_CLICK_DISTANCE
+    )
+    if _click_state["button"] == button and same_spot and now - _click_state["time"] <= DOUBLE_CLICK_INTERVAL:
+        count = _click_state["count"] + 1
+    else:
+        count = 1
+    _click_state.update(time=now, pos=pos, button=button, count=count)
+    return count
+
+
+def _post_mouse_event(event_type, pos, button_const, click_count):
+    event = Quartz.CGEventCreateMouseEvent(None, event_type, pos, button_const)
+    Quartz.CGEventSetIntegerValueField(event, Quartz.kCGMouseEventClickState, click_count)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 # Shared input handlers — called from both the HTTP /input/* routes (for
@@ -269,10 +339,16 @@ def resolve_button(name):
 def do_mousedown(button, x=None, y=None):
     # x/y are optional: the Left/Right Click buttons press wherever the
     # cursor already is (positioned by prior mousemove calls) rather than
-    # moving it — pyautogui.mouseDown() presses at the current OS position.
+    # moving it.
     if x is not None and y is not None:
         pag(pyautogui.moveTo, x, y)
-    pag(pyautogui.mouseDown, button=resolve_button(button))
+        pos = (x, y)
+    else:
+        pos = tuple(pyautogui.position())
+    button = resolve_button(button)
+    down_type, _up_type, btn_const = _MOUSE_EVENT_TYPES[button]
+    count = _next_click_count(pos, button)
+    pag(_post_mouse_event, down_type, pos, btn_const, count)
 
 
 def do_mousemove(x, y):
@@ -280,7 +356,13 @@ def do_mousemove(x, y):
 
 
 def do_mouseup(button):
-    pag(pyautogui.mouseUp, button=resolve_button(button))
+    pos = tuple(pyautogui.position())
+    button = resolve_button(button)
+    _down_type, up_type, btn_const = _MOUSE_EVENT_TYPES[button]
+    # Match whatever click count the most recent mousedown used — mouseup
+    # needs the same click-state value to complete that click correctly.
+    count = _click_state["count"] or 1
+    pag(_post_mouse_event, up_type, pos, btn_const, count)
 
 
 def do_scroll(dx, dy):
@@ -405,11 +487,22 @@ def ws_handler(ws):
     send_lock = threading.Lock()  # ws.send() isn't safe to call from two threads at once
 
     def frame_sender():
+        last_hash = None
         while not stop.is_set():
             try:
-                data, _mimetype = capture_frame_bytes(prefer_speed=rate_mode == "optimal")
-                with send_lock:
-                    ws.send(data)
+                img = take_screenshot()
+                h = frame_hash(img)
+                if h == last_hash:
+                    # Screen hasn't changed — skip encoding entirely and send
+                    # a tiny marker instead of re-transferring an identical
+                    # image. Still counts as this cycle's "frame" for pacing.
+                    with send_lock:
+                        ws.send(json.dumps({"type": "unchanged"}))
+                else:
+                    data, _mimetype = encode_frame(img, prefer_speed=rate_mode == "optimal")
+                    with send_lock:
+                        ws.send(data)
+                    last_hash = h
             except Exception:
                 break
             ack_event.clear()
@@ -568,6 +661,17 @@ HTML_PAGE = """
                whole row on one line instead of wrapping; overflow-x is a
                safety net in case it still doesn't quite fit. */
             #controls { flex-wrap: nowrap; overflow-x: auto; }
+        }
+        @media (min-width: 800px) {
+            /* Once there's comfortably more room than the buttons need
+               (measured content width is ~741px), spread them across the
+               full bar instead of leaving one dead gap after the last
+               button. Kept above 600px's breakpoint and short of exactly
+               matching the content width on purpose: combining
+               justify-content with overflow-x:auto when content might
+               still be overflowing can make the scrollable range start
+               from a confusing offset instead of the natural left edge. */
+            #controls { justify-content: space-between; }
         }
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
@@ -831,14 +935,17 @@ HTML_PAGE = """
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode);
             ws.binaryType = 'blob';
+            function sendFrameAck() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'frame_ack' }));
+                }
+            }
             ws.onmessage = (evt) => {
                 if (evt.data instanceof Blob) {
                     // Ack immediately, before any decode/render work, so the
                     // round trip the server paces on reflects transport time,
                     // not client-side processing time.
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'frame_ack' }));
-                    }
+                    sendFrameAck();
                     markFreshFrame();
                     const url = URL.createObjectURL(evt.data);
                     const previous = wsFrameUrl;
@@ -849,7 +956,17 @@ HTML_PAGE = """
                 }
                 try {
                     const msg = JSON.parse(evt.data);
-                    if (msg.type === 'pong') markRTT(performance.now() - msg.t);
+                    if (msg.type === 'pong') {
+                        markRTT(performance.now() - msg.t);
+                    } else if (msg.type === 'unchanged') {
+                        // Screen hasn't changed since the last frame — server
+                        // sent this tiny marker instead of re-transferring an
+                        // identical image. Still ack it (keeps the server's
+                        // send-pace moving) and mark freshness (this IS
+                        // current information, just "no change").
+                        sendFrameAck();
+                        markFreshFrame();
+                    }
                 } catch (e) { /* ignore */ }
             };
             ws.onclose = () => { if (transportMode === 'ws') ws = null; };
@@ -876,7 +993,14 @@ HTML_PAGE = """
                     resolve(true);
                 };
                 next.onerror = () => resolve(false);
-                next.src = '/screenshot?token=' + TOKEN + '&rate=' + rateMode + '&t=' + Date.now();
+                // No cache-busting timestamp here on purpose: the server
+                // sends Cache-Control: no-cache + ETag, so the browser
+                // always revalidates with If-None-Match rather than ever
+                // using a stale cached copy outright — an unchanged screen
+                // costs a small 304 instead of a full image transfer +
+                // decode. A unique URL every request would defeat that
+                // entirely (never match anything to revalidate against).
+                next.src = '/screenshot?token=' + TOKEN + '&rate=' + rateMode;
             });
         }
 
