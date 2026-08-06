@@ -152,8 +152,8 @@ def manifest():
         "scope": "/",
         "display": "standalone",
         "orientation": "any",
-        "background_color": "#1a1a1a",
-        "theme_color": "#1a1a1a",
+        "background_color": "#111",
+        "theme_color": "#111",
         "icons": [
             {**icon("icon-192.png", "any"), "sizes": "192x192"},
             {**icon("icon-192.png", "maskable"), "sizes": "192x192"},
@@ -569,7 +569,7 @@ HTML_PAGE = """
 <head>
     <title>Poor Person's KVM</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta name="theme-color" content="#1a1a1a">
+    <meta name="theme-color" content="#111">
     <link rel="manifest" href="/manifest.json?token=TOKEN_PLACEHOLDER">
     <link rel="icon" type="image/png" href="/static/icon-192.png?token=TOKEN_PLACEHOLDER">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?token=TOKEN_PLACEHOLDER">
@@ -580,7 +580,7 @@ HTML_PAGE = """
     <style>
         * { box-sizing: border-box; }
         body {
-            margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif;
+            margin: 0; background: #111; color: #eee; font-family: -apple-system, sans-serif;
             display: flex; flex-direction: column; height: 100dvh;
             /* Needs to be a definite height, not min-height — flexbox only
                actually shrinks #screenCenterer below its content's natural
