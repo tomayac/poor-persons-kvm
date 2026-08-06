@@ -458,16 +458,16 @@ HTML_PAGE = """
     <meta name="apple-mobile-web-app-title" content="KVM">
     <style>
         * { box-sizing: border-box; }
-        body {
-            margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif;
-            /* Requires viewport-fit=cover above, or these always read 0. Keeps
-               content out of Android's gesture-nav bar and iOS's notch/home
-               indicator when running edge-to-edge (standalone PWA, fullscreen).
-               The 0px fallback is a no-op on devices/orientations with no inset. */
-            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
-                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        body { margin: 0; background: #1a1a1a; color: #eee; font-family: -apple-system, sans-serif; }
+        #topbar {
+            position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap;
+            /* Requires viewport-fit=cover on the viewport meta tag, or this
+               always reads 0. Scoped to the actual top element (not body —
+               that caused clipping, likely a viewport-height/scroll
+               interaction on Android) so it only ever adds space, never
+               changes how the page's overall height is computed. */
+            padding-top: max(8px, env(safe-area-inset-top, 8px));
         }
-        #topbar { position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap; }
         #topbar span#status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
         #topbar span#status.ok { background: #1e7e34; }
         #topbar span#status.bad { background: #a11; }
@@ -504,7 +504,16 @@ HTML_PAGE = """
         #staleOverlay span { font-size: 13px; color: #ccc; }
         body.compact #topbar, body.compact #textRow, body.compact #controls,
         body.compact #clickRow { display: none; }
-        #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111; }
+        /* #screenWrap is the only thing left visible in compact mode, so it
+           needs its own bottom inset — in normal mode #controls below it
+           already reserves this space at the page's true bottom edge. */
+        body.compact #screenWrap { padding-bottom: env(safe-area-inset-bottom, 0px); }
+        #controls {
+            display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: #111;
+            /* Same reasoning as #topbar's padding-top above: scoped to the
+               actual last element in normal flow, not body. */
+            padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+        }
         @media (min-width: 600px) {
             /* Wide viewports (tablets, unfolded foldables, desktop) get the
                whole row on one line instead of wrapping; overflow-x is a
@@ -544,12 +553,13 @@ HTML_PAGE = """
         <button id="zoomInBtn">Zoom +</button>
         <button id="resetZoom">Reset Zoom</button>
         <button id="fullscreenBtn">Fullscreen</button>
+        <button id="refreshBtn">Refresh</button>
         <button id="settingsBtn">⚙ Settings</button>
         <div id="settingsPanel">
             <label>Transport
                 <select id="transportMode">
                     <option value="poll">Polling</option>
-                    <option value="ws" selected>WebSocket</option>
+                    <option value="ws" selected>WebSocket (optimal)</option>
                 </select>
             </label>
             <label>Refresh rate
@@ -597,7 +607,6 @@ HTML_PAGE = """
         <button data-key="cmd+v">Cmd+V</button>
         <button data-key="cmd+z">Cmd+Z</button>
         <button data-key="cmd+tab">Cmd+Tab</button>
-        <button id="refreshBtn">Refresh</button>
     </div>
 
     <script>
