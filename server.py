@@ -1483,6 +1483,16 @@ HTML_PAGE = """
 
         screenWrap.addEventListener('wheel', (e) => {
             e.preventDefault();
+            // Two-finger pan on Android Chrome fires this as a synthetic
+            // compatibility event on TOP of the real pointer events already
+            // driving the local pinch/pan handling above — forwarding it too
+            // sent an unintended scroll to the Mac on every touch-pan, which
+            // (via Chrome Remote Desktop) misread as a workspace-switch
+            // swipe on the far end. activePointers is already tracking any
+            // in-progress touch gesture, so a wheel event firing while it's
+            // non-empty is that synthetic echo, not a real trackpad/mouse
+            // wheel — only forward when no touch is active.
+            if (activePointers.size > 0) return;
             sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
         }, { passive: false });
 
