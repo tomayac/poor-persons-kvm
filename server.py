@@ -1194,6 +1194,9 @@ HTML_PAGE = """
         const SLOW_INTERVAL_MS = 2000; // mirrors the server's WS_SLOW_INTERVAL default
         let ws = null;
         let wsFrameUrl = null; // current blob: URL backing the <img>, for revocation
+        let wsReconnectTimer = null;
+        let wsReconnectDelay = 1000; // ms — doubles on each failed attempt, capped below
+        const WS_RECONNECT_MAX_DELAY_MS = 15000;
 
         function sendInput(type, body) {
             if (transportMode === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
@@ -1205,10 +1208,31 @@ HTML_PAGE = """
 
         let wsPingTimer = null;
 
+        // Reconnects with backoff on any drop — a dead connection previously
+        // just sat there forever (ws set to null, nothing ever retried),
+        // which looked like the whole app had frozen since WS mode's
+        // "Refresh" is a deliberate no-op (frames normally arrive on their
+        // own) and input silently falls back to HTTP with no visible sign
+        // anything was wrong. Resets to the minimum delay on an actual
+        // reopen (visibilitychange below), since "I just switched back to
+        // this tab/app" is a strong signal it's worth trying immediately
+        // rather than waiting out whatever backoff a previous silent
+        // background failure had built up.
+        function scheduleWSReconnect() {
+            if (wsReconnectTimer || transportMode !== 'ws') return;
+            wsReconnectTimer = setTimeout(() => {
+                wsReconnectTimer = null;
+                if (transportMode === 'ws') connectWS();
+            }, wsReconnectDelay);
+            wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_MAX_DELAY_MS);
+        }
+
         function connectWS() {
+            if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode);
             ws.binaryType = 'blob';
+            ws.onopen = () => { wsReconnectDelay = 1000; };
             function sendFrameAck() {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'frame_ack' }));
@@ -1243,7 +1267,10 @@ HTML_PAGE = """
                     }
                 } catch (e) { /* ignore */ }
             };
-            ws.onclose = () => { if (transportMode === 'ws') ws = null; };
+            ws.onclose = () => {
+                ws = null;
+                if (transportMode === 'ws') scheduleWSReconnect();
+            };
             wsPingTimer = setInterval(() => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'ping', t: performance.now() }));
@@ -1252,6 +1279,9 @@ HTML_PAGE = """
         }
 
         function disconnectWS() {
+            // Explicit disconnect (switching to polling, etc.) — unlike an
+            // unexpected drop, this should never trigger a reconnect.
+            if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
             if (ws) { ws.onclose = null; ws.close(); ws = null; }
             if (wsFrameUrl) { URL.revokeObjectURL(wsFrameUrl); wsFrameUrl = null; }
@@ -1632,6 +1662,23 @@ HTML_PAGE = """
         pollHealth();
         setInterval(pollHealth, 5000);
         if (transportMode === 'ws') connectWS(); else startPollLoop();
+
+        // Reopening the app (backgrounded PWA brought back to front) or
+        // regaining network are both strong, specific signals that a dead
+        // connection is worth retrying right now, rather than waiting out
+        // whatever backoff delay scheduleWSReconnect had already built up —
+        // this is the actual fix for "the PWA doesn't reconnect on its own,
+        // only killing and restarting it works".
+        function tryImmediateWSReconnect() {
+            if (transportMode !== 'ws') return;
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+            wsReconnectDelay = 1000;
+            connectWS();
+        }
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') tryImmediateWSReconnect();
+        });
+        window.addEventListener('online', tryImmediateWSReconnect);
     </script>
 </body>
 </html>
