@@ -100,10 +100,36 @@ def pag(fn, *args, **kwargs):
 # capture itself is serialized.
 screenshot_lock = threading.Lock()
 
+# The client maps clicks to the screenshot image's own pixel dimensions
+# (naturalWidth/naturalHeight — physical pixels), but pyautogui.moveTo()
+# expects logical points (pyautogui.size()). On a non-Retina display, or
+# under some Retina configurations, those happen to be equal and this never
+# matters; on a true 2x Retina display they're not (e.g. a 3420x2224
+# screenshot on a 1710x1112-point screen), and clicks land at roughly double
+# the intended distance from the top-left with no scaling correction.
+# Updated every capture rather than queried separately (a second
+# pyautogui.screenshot() per click would be far too slow) — falls back to
+# assuming 1:1 (no scaling) until the first frame's been captured.
+_last_screenshot_size = None
+
 
 def take_screenshot():
+    global _last_screenshot_size
     with screenshot_lock:
-        return pag(pyautogui.screenshot)
+        img = pag(pyautogui.screenshot)
+    _last_screenshot_size = img.size
+    return img
+
+
+def scale_to_screen(x, y):
+    """Map a click's screenshot-pixel coordinates to pyautogui's logical points."""
+    if _last_screenshot_size is None:
+        return x, y
+    screen_w, screen_h = pyautogui.size()
+    shot_w, shot_h = _last_screenshot_size
+    if shot_w == screen_w and shot_h == screen_h:
+        return x, y
+    return x * screen_w / shot_w, y * screen_h / shot_h
 
 
 def local_ip():
@@ -492,6 +518,7 @@ def do_mousedown(button, x=None, y=None):
     # cursor already is (positioned by prior mousemove calls) rather than
     # moving it.
     if x is not None and y is not None:
+        x, y = scale_to_screen(x, y)
         pag(pyautogui.moveTo, x, y)
         pos = (x, y)
     else:
@@ -503,6 +530,7 @@ def do_mousedown(button, x=None, y=None):
 
 
 def do_mousemove(x, y):
+    x, y = scale_to_screen(x, y)
     pag(pyautogui.moveTo, x, y)
 
 
