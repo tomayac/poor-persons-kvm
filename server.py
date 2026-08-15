@@ -794,11 +794,9 @@ HTML_PAGE = """
         }
         /* Same margin-block-end treatment as #clickRow/#textRow below, so the
            video-to-first-bar gap matches the gap between the bars
-           themselves. Scoped to non-compact mode — in fullscreen,
-           #clickRow/#textRow/#controls are all display:none, so this margin
-           would otherwise leave a stray gap at the very bottom instead of
-           between two visible things. */
-        body:not(.compact) #screenCenterer { margin-block-end: 8px; }
+           themselves — applies in fullscreen too now, since the button rows
+           stay visible there as well. */
+        #screenCenterer { margin-block-end: 8px; }
         #topbar {
             position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; background: #111; flex-wrap: wrap;
             /* Requires viewport-fit=cover on the viewport meta tag, or this
@@ -880,12 +878,6 @@ HTML_PAGE = """
         #staleOverlay.active { opacity: 1; pointer-events: auto; }
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
-        body.compact #topbar, body.compact #textRow, body.compact #controls,
-        body.compact #clickRow { display: none; }
-        /* #screenWrap is the only thing left visible in compact mode, so it
-           needs its own bottom inset — in normal mode #controls below it
-           already reserves this space at the page's true bottom edge. */
-        body.compact #screenWrap { padding-bottom: env(safe-area-inset-bottom, 0px); }
         #controls {
             /* No block padding — see #clickRow below for why. Its own
                bottom safe-area inset becomes margin instead of padding for
@@ -1553,7 +1545,6 @@ HTML_PAGE = """
                 `devicePixelRatio: ${window.devicePixelRatio}`,
                 `display-mode standalone: ${window.matchMedia('(display-mode: standalone)').matches}`,
                 `fullscreenElement: ${!!document.fullscreenElement}`,
-                `body.compact: ${document.body.classList.contains('compact')}`,
                 `orientation: ${screen.orientation ? screen.orientation.type : 'n/a'}`,
                 `#controls rect: top=${Math.round(controlsRect.top)} bottom=${Math.round(controlsRect.bottom)}`,
                 `#controls fully visible: ${controlsRect.bottom <= window.innerHeight}`,
@@ -1605,26 +1596,30 @@ HTML_PAGE = """
 
         const fullscreenBtn = document.getElementById('fullscreenBtn');
         async function toggleFullscreen() {
-            const goingCompact = !document.body.classList.contains('compact');
-            document.body.classList.toggle('compact', goingCompact);
-            fullscreenBtn.textContent = goingCompact ? 'Exit' : 'Fullscreen';
+            // Purely the browser Fullscreen API now (hides browser chrome —
+            // address bar etc.) — the page's own UI (button bars) stays
+            // fully visible and functional throughout, it's just given more
+            // room by the browser chrome going away. The button's label is
+            // driven by the fullscreenchange listener below, not set here,
+            // so it only ever says "Exit" when fullscreen genuinely
+            // succeeded (e.g. iOS Safari has no Fullscreen API at all, and
+            // the button correctly stays a no-op there rather than lying
+            // about what happened).
             try {
-                if (goingCompact && document.documentElement.requestFullscreen) {
+                if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
                     await document.documentElement.requestFullscreen();
-                } else if (!goingCompact && document.fullscreenElement) {
+                } else if (document.fullscreenElement) {
                     await document.exitFullscreen();
                 }
             } catch (e) {
-                // Fullscreen API unsupported/denied (e.g. iOS Safari) — the
-                // compact CSS class above still reclaims the screen space.
+                // Fullscreen API unsupported/denied (e.g. iOS Safari) — nothing else to do.
             }
         }
         fullscreenBtn.addEventListener('click', toggleFullscreen);
+        // Covers exiting via Esc/swipe-back too, not just this button — the
+        // label always reflects the browser's actual fullscreen state.
         document.addEventListener('fullscreenchange', () => {
-            if (!document.fullscreenElement && document.body.classList.contains('compact')) {
-                document.body.classList.remove('compact');
-                fullscreenBtn.textContent = 'Fullscreen';
-            }
+            fullscreenBtn.textContent = document.fullscreenElement ? 'Exit' : 'Fullscreen';
         });
 
         document.querySelectorAll('#controls button[data-key]').forEach(btn => {
