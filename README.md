@@ -49,6 +49,29 @@ The generated LaunchAgent plist and its helper scripts (which do contain the act
 
 The first time this runs, Screen Recording/Accessibility calls will fail (500s from `/health`) until iTerm itself has been granted both in System Settings > Privacy & Security — a one-time step, since iTerm's own app path doesn't move around the way Homebrew's does.
 
+## Remote access beyond the LAN
+
+For access from outside the home network (e.g. a laptop that isn't always on the same Wi-Fi as the reverse proxy), a reverse SSH tunnel makes the machine reachable regardless of where it currently is, without any dynamic DNS or router configuration on its end — it only ever makes an outbound connection.
+
+```bash
+brew install autossh
+SSH_KEY=~/.ssh/some-dedicated-key \
+REMOTE_HOST=your-ha-domain \
+REMOTE_PORT=23 \
+REMOTE_USER=hassio \
+REMOTE_TUNNEL_PORT=15959 \
+./scripts/setup-tunnel.sh
+```
+
+Installs a LaunchAgent that keeps `autossh` running, forwarding `REMOTE_TUNNEL_PORT` on the remote host back to this machine's `server.py`. `REMOTE_TUNNEL_PORT` must be unique per machine sharing the same remote host (e.g. `15959`/`25959` for two laptops) — the reverse proxy's `proxy_pass` then targets `http://127.0.0.1:<that port>` instead of a LAN IP, so it works the same whether this machine is home or anywhere else.
+
+Prerequisites this doesn't set up for you:
+- An SSH server on the remote host with a dedicated key added to its `authorized_keys`, and `AllowTcpForwarding`/remote port forwarding actually permitted — not assumed to be on by default.
+- That SSH port forwarded through the remote host's router/firewall.
+- The reverse proxy's config pointed at the tunnel's local port (see above).
+
+One portability gotcha worth knowing about: on at least one Mac, `/usr/local/bin/ssh` silently shadowed the real `ssh` with a corp SSH wrapper that accepted the `-R` forwarding request but never actually relayed any data — no error, just a tunnel that looks up but doesn't work. `setup-tunnel.sh` sidesteps this by pointing `autossh` at `/usr/bin/ssh` explicitly via `AUTOSSH_PATH`. If a tunnel ever "looks connected" but requests through it hang, check what `ssh` actually resolves to (`type -a ssh`) before assuming the network path itself is broken.
+
 ## Installing as an app
 
 The page is an installable PWA — on the phone's browser, use "Add to Home Screen" (iOS Safari share sheet) or the install prompt (Android Chrome). The installed icon's `start_url` bakes in the current auth token, so launching it opens straight into the app.
