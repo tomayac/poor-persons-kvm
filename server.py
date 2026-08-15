@@ -1640,7 +1640,22 @@ HTML_PAGE = """
         document.getElementById('refreshBtn').addEventListener('click', refreshScreen);
 
         function pollHealth() {
-            fetch('/health?token=' + TOKEN).then(r => r.json()).then(d => {
+            fetch('/health?token=' + TOKEN).then(r => {
+                // A non-2xx here (in practice almost always a 502/504) means
+                // the request reached the reverse proxy fine, but IT
+                // couldn't reach the Mac — most likely the reverse tunnel
+                // (or the Mac itself) is down. Checked before parsing JSON,
+                // since the proxy's own error pages are HTML, not JSON, and
+                // would otherwise look identical to "totally unreachable"
+                // below once JSON parsing threw.
+                if (!r.ok) {
+                    statusEl.textContent = 'Mac unreachable';
+                    statusEl.className = 'bad';
+                    return null;
+                }
+                return r.json();
+            }).then(d => {
+                if (!d) return; // non-2xx case, already handled above
                 if (d.screenshot_ok) {
                     statusEl.textContent = 'connected';
                     statusEl.className = 'ok';
@@ -1649,7 +1664,13 @@ HTML_PAGE = """
                     statusEl.className = 'bad';
                 }
             }).catch(() => {
-                statusEl.textContent = 'disconnected';
+                // fetch() itself rejected — no HTTP response at all, so this
+                // device can't reach the server (no internet, DNS failure,
+                // etc.), as distinct from the server being reachable but
+                // unable to reach the Mac (handled above). On a plain LAN
+                // setup with no reverse proxy in the picture at all, this is
+                // just "can't reach the Mac," which is still correct.
+                statusEl.textContent = 'no connection';
                 statusEl.className = 'bad';
             });
         }
