@@ -125,10 +125,24 @@ def pag(fn, *args, **kwargs):
 
 # macOS's screen-capture API errors ("could not create image from display")
 # when hit by overlapping calls — with threaded=True, polling tabs, /health
-# checks, and the /ws frame sender can all land at once. Input handling stays
-# fully concurrent (that's what threaded=True is actually for); only the
-# capture itself is serialized.
+# checks, and the /ws frame sender can all land at once. Capture itself is
+# serialized by this; see input_lock below for why keyboard input isn't
+# actually safe to leave fully concurrent the way this comment used to claim.
 screenshot_lock = threading.Lock()
+
+# do_text()/do_key()/do_doubleclick() each post a *sequence* of synthetic OS
+# events (one keystroke per character, a hotkey's down+down+up+up, a scripted
+# click-click) — safe when the whole sequence runs uninterrupted, but Flask's
+# threaded=True (needed for capture/input concurrency generally) means two of
+# these could genuinely run at once on separate threads: an HTTP polling
+# client's own concurrent requests, or a WS text send racing a same-connection
+# key press. An interleaved sequence can leave a modifier key logically stuck
+# "down" from the OS's point of view — this is suspected to be exactly what
+# briefly made macOS's own Control-tap Dictation shortcut fire once, and
+# garbled at least one character send. Serializing the actual event-posting
+# (not the whole request/dispatch, which still returns promptly) closes that
+# without reintroducing the latency problem this was blocking on.
+input_lock = threading.Lock()
 
 # The client maps clicks to the streamed image's own pixel dimensions
 # (naturalWidth/naturalHeight), but pyautogui.moveTo() expects logical
@@ -710,12 +724,13 @@ def do_doubleclick(button):
     pos = tuple(pyautogui.position())
     button = resolve_button(button)
     down_type, up_type, btn_const = _MOUSE_EVENT_TYPES[button]
-    for count in (1, 2):
-        pag(_post_mouse_event, down_type, pos, btn_const, count)
-        pag(_post_mouse_event, up_type, pos, btn_const, count)
-        _click_state.update(time=time.time(), pos=pos, button=button, count=count)
-        if count == 1:
-            time.sleep(0.05)
+    with input_lock:
+        for count in (1, 2):
+            pag(_post_mouse_event, down_type, pos, btn_const, count)
+            pag(_post_mouse_event, up_type, pos, btn_const, count)
+            _click_state.update(time=time.time(), pos=pos, button=button, count=count)
+            if count == 1:
+                time.sleep(0.05)
 
 
 def do_scroll(dx, dy):
@@ -728,26 +743,28 @@ def do_scroll(dx, dy):
 def do_text(text):
     if not text:
         return
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        if line:
-            pag(pyautogui.typewrite, line, interval=0.01)
-        if i < len(lines) - 1:
-            # pyautogui.typewrite()'s own mapping for an embedded \n is a
-            # plain Enter, which most chat-style apps (Slack, Discord,
-            # Messages, ...) read as "submit" — splitting one multi-line
-            # message into several separate ones instead of inserting a
-            # line break within it. Shift+Enter is the common convention
-            # across those apps for a literal line break without submitting.
-            pag(pyautogui.hotkey, "shift", "enter")
+    with input_lock:
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                pag(pyautogui.typewrite, line, interval=0.01)
+            if i < len(lines) - 1:
+                # pyautogui.typewrite()'s own mapping for an embedded \n is a
+                # plain Enter, which most chat-style apps (Slack, Discord,
+                # Messages, ...) read as "submit" — splitting one multi-line
+                # message into several separate ones instead of inserting a
+                # line break within it. Shift+Enter is the common convention
+                # across those apps for a literal line break without submitting.
+                pag(pyautogui.hotkey, "shift", "enter")
 
 
 def do_key(combo):
     keys = [KEY_ALIASES.get(k.lower(), k.lower()) for k in combo.split("+")]
-    if len(keys) > 1:
-        pag(pyautogui.hotkey, *keys)
-    else:
-        pag(pyautogui.press, keys[0])
+    with input_lock:
+        if len(keys) > 1:
+            pag(pyautogui.hotkey, *keys)
+        else:
+            pag(pyautogui.press, keys[0])
 
 
 def dispatch_input(data):
@@ -936,25 +953,27 @@ def ws_handler(ws):
                 elif kind == "ping":
                     with send_lock:
                         ws.send(json.dumps({"type": "pong", "t": data.get("t")}))
-                elif kind == "text":
-                    # do_text() posts one real keystroke event per character
-                    # (plus a Shift+Enter hotkey between lines), which can
-                    # take a genuinely noticeable fraction of a second for a
-                    # longer message — running it inline here would block
-                    # this same loop from reading the next message (a ping,
-                    # a frame_ack) until typing finishes, which showed up as
-                    # a false "connection is slow": the delayed pong tripped
-                    # the RTT staleness threshold even though the pipe
-                    # itself was fine, and frame delivery genuinely paused
-                    # too (frame_ack processing was equally blocked).
-                    # Backgrounded specifically for this input type, not
-                    # mouse/key events, since those have real ordering
-                    # dependencies (e.g. a drag's mousedown/mousemove/mouseup
-                    # sequence) that dispatching from independent threads
-                    # would risk reordering; nothing else depends on typing
-                    # finishing before the next message is handled.
-                    threading.Thread(target=dispatch_input, args=(data,), daemon=True).start()
                 else:
+                    # text messages used to be dispatched on their own
+                    # background thread here specifically to keep do_text()'s
+                    # per-character typing from blocking this loop's own
+                    # ping/frame_ack handling (it was briefly showing a false
+                    # "connection is slow"). That's back to inline/synchronous
+                    # now — running it on a second thread meant it could
+                    # genuinely race an overlapping input dispatch (e.g. an
+                    # HTTP polling client's own concurrent request, which
+                    # Flask's threaded=True already allows), and an
+                    # interleaved keyboard-event sequence can leave a modifier
+                    # key logically stuck down — this is suspected to be
+                    # exactly what briefly triggered macOS's own Dictation
+                    # shortcut and garbled a character send. input_lock now
+                    # serializes the actual event-posting inside
+                    # do_text/do_key/do_doubleclick regardless of dispatch
+                    # thread, which is the correct fix for that; going back
+                    # to synchronous dispatch here removes the specific
+                    # thread that made the race possible in the first place,
+                    # at the cost of reintroducing the original (purely
+                    # cosmetic) false-staleness flash for a long message.
                     dispatch_input(data)
             except Exception:
                 pass  # malformed/failed message — drop it, keep the connection alive
