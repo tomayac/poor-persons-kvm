@@ -1041,23 +1041,20 @@ HTML_PAGE = """
         #topbar span#status.bad { background: #a11; }
         #settingsPanel {
             display: none; position: absolute; top: 100%; right: 8px; margin-top: 4px;
-            flex-direction: column; gap: 10px; padding: 12px; min-width: 220px;
+            grid-template-columns: auto 1fr; align-items: center; column-gap: 12px; row-gap: 10px;
+            padding: 12px; min-width: 220px;
             background: #181818; border: 1px solid #333; border-radius: 8px;
             box-shadow: 0 6px 16px rgba(0,0,0,0.5); z-index: 30;
         }
-        #settingsPanel.open { display: flex; }
-        #settingsPanel label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: #ccc; }
-        /* TEMP DEBUG */
-        #debugInfo {
-            font-family: monospace; font-size: 10px; line-height: 1.5; color: #8f8;
-            white-space: pre-wrap; max-width: 280px; max-height: 220px; overflow-y: auto;
-            border-top: 1px solid #333; padding-top: 8px; margin: 0;
-        }
-        #safeAreaProbe {
-            position: fixed; visibility: hidden; pointer-events: none;
-            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
-                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
-        }
+        #settingsPanel.open { display: grid; }
+        /* display:contents takes the <label> itself out of layout so its
+           text and <select> become grid items directly on #settingsPanel's
+           own grid — that's what actually lines every row's label up in one
+           column and every select up in another, rather than each label
+           independently justify-content:space-between-ing its own two
+           children with no relationship to the other rows' widths. */
+        #settingsPanel label { display: contents; font-size: 13px; color: #ccc; }
+        #settingsPanel #logoutBtn { grid-column: 1 / -1; }
         #screenWrap {
             position: relative; touch-action: none; overflow: hidden;
             /* This is the ONE element that shrinks to fit available space —
@@ -1190,19 +1187,19 @@ HTML_PAGE = """
         <button id="refreshBtn">Refresh</button>
         <button id="settingsBtn">⚙ Settings</button>
         <div id="settingsPanel">
-            <label>Transport
+            <label><span>Transport</span>
                 <select id="transportMode">
                     <option value="poll">Polling</option>
                     <option value="ws" selected>WebSocket (optimal)</option>
                 </select>
             </label>
-            <label>Refresh rate
+            <label><span>Refresh rate</span>
                 <select id="rateMode">
                     <option value="optimal" selected>Adapts to round-trip time (optimal)</option>
                     <option value="slow">Fixed interval</option>
                 </select>
             </label>
-            <label>Resolution
+            <label><span>Resolution</span>
                 <select id="resolutionMode">
                     <option value="auto" selected>Adapts to connection speed (optimal)</option>
                     <option value="full">Full (native)</option>
@@ -1212,11 +1209,8 @@ HTML_PAGE = """
                 </select>
             </label>
             <button id="logoutBtn">Log Out</button>
-            <!-- TEMP DEBUG: safe-area diagnostics, remove once the Android clipping issue is confirmed fixed -->
-            <pre id="debugInfo"></pre>
         </div>
     </div>
-    <div id="safeAreaProbe"></div>
     <div id="screenCenterer">
         <div id="screenWrap">
             <div id="zoomLayer">
@@ -1786,39 +1780,8 @@ HTML_PAGE = """
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
 
-        // TEMP DEBUG — remove this whole block once the Android safe-area
-        // clipping issue is confirmed fixed on a real device.
-        function updateDebugInfo() {
-            const probe = document.getElementById('safeAreaProbe');
-            const cs = getComputedStyle(probe);
-            const vv = window.visualViewport;
-            const controlsRect = document.getElementById('controls').getBoundingClientRect();
-            const clickRowRect = document.getElementById('clickRow').getBoundingClientRect();
-            const lines = [
-                `safe-area-inset: T=${cs.paddingTop} R=${cs.paddingRight} B=${cs.paddingBottom} L=${cs.paddingLeft}`,
-                `window.innerWidth/Height: ${window.innerWidth} / ${window.innerHeight}`,
-                `visualViewport w/h: ${vv ? Math.round(vv.width) : 'n/a'} / ${vv ? Math.round(vv.height) : 'n/a'}`,
-                `visualViewport offsetTop/Left: ${vv ? vv.offsetTop : 'n/a'} / ${vv ? vv.offsetLeft : 'n/a'}`,
-                `documentElement client W/H: ${document.documentElement.clientWidth} / ${document.documentElement.clientHeight}`,
-                `body scrollHeight: ${document.body.scrollHeight}`,
-                `devicePixelRatio: ${window.devicePixelRatio}`,
-                `display-mode standalone: ${window.matchMedia('(display-mode: standalone)').matches}`,
-                `fullscreenElement: ${!!document.fullscreenElement}`,
-                `orientation: ${screen.orientation ? screen.orientation.type : 'n/a'}`,
-                `#controls rect: top=${Math.round(controlsRect.top)} bottom=${Math.round(controlsRect.bottom)}`,
-                `#controls fully visible: ${controlsRect.bottom <= window.innerHeight}`,
-                `#clickRow rect: top=${Math.round(clickRowRect.top)} bottom=${Math.round(clickRowRect.bottom)}`,
-            ];
-            document.getElementById('debugInfo').textContent = lines.join('\\n');
-        }
-        updateDebugInfo();
-        window.addEventListener('resize', updateDebugInfo);
-        if (window.visualViewport) window.visualViewport.addEventListener('resize', updateDebugInfo);
-        screen.orientation && screen.orientation.addEventListener('change', updateDebugInfo);
-
         document.getElementById('settingsBtn').addEventListener('click', () => {
             document.getElementById('settingsPanel').classList.toggle('open');
-            updateDebugInfo();
         });
         document.getElementById('logoutBtn').addEventListener('click', () => {
             localStorage.removeItem('kvmToken');
