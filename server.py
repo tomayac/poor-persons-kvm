@@ -673,8 +673,20 @@ def do_scroll(dx, dy):
 
 
 def do_text(text):
-    if text:
-        pag(pyautogui.typewrite, text, interval=0.01)
+    if not text:
+        return
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line:
+            pag(pyautogui.typewrite, line, interval=0.01)
+        if i < len(lines) - 1:
+            # pyautogui.typewrite()'s own mapping for an embedded \n is a
+            # plain Enter, which most chat-style apps (Slack, Discord,
+            # Messages, ...) read as "submit" — splitting one multi-line
+            # message into several separate ones instead of inserting a
+            # line break within it. Shift+Enter is the common convention
+            # across those apps for a literal line break without submitting.
+            pag(pyautogui.hotkey, "shift", "enter")
 
 
 def do_key(combo):
