@@ -1141,6 +1141,7 @@ HTML_PAGE = """
             flex: 1 0 auto;
         }
         #arrowGroup button { padding: 8px; min-width: 40px; }
+        #arrowGroup button.small { font-size: 11px; padding: 8px 2px; }
         .arrow-pgup { grid-area: pgup; }
         .arrow-up { grid-area: up; }
         .arrow-pgdn { grid-area: pgdn; }
@@ -1254,9 +1255,9 @@ HTML_PAGE = """
         <button data-key="tab">Tab</button>
         <button data-key="escape">Esc</button>
         <div id="arrowGroup">
-            <button class="arrow-pgup" data-key="pageup">&#8670;</button>
+            <button class="arrow-pgup small" data-key="pageup">PgUp</button>
             <button class="arrow-up" data-key="up">&uarr;</button>
-            <button class="arrow-pgdn" data-key="pagedown">&#8671;</button>
+            <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
             <button class="arrow-left" data-key="left">&larr;</button>
             <button class="arrow-down" data-key="down">&darr;</button>
             <button class="arrow-right" data-key="right">&rarr;</button>
