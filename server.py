@@ -846,6 +846,24 @@ def ws_handler(ws):
                 elif kind == "ping":
                     with send_lock:
                         ws.send(json.dumps({"type": "pong", "t": data.get("t")}))
+                elif kind == "text":
+                    # do_text() posts one real keystroke event per character
+                    # (plus a Shift+Enter hotkey between lines), which can
+                    # take a genuinely noticeable fraction of a second for a
+                    # longer message — running it inline here would block
+                    # this same loop from reading the next message (a ping,
+                    # a frame_ack) until typing finishes, which showed up as
+                    # a false "connection is slow": the delayed pong tripped
+                    # the RTT staleness threshold even though the pipe
+                    # itself was fine, and frame delivery genuinely paused
+                    # too (frame_ack processing was equally blocked).
+                    # Backgrounded specifically for this input type, not
+                    # mouse/key events, since those have real ordering
+                    # dependencies (e.g. a drag's mousedown/mousemove/mouseup
+                    # sequence) that dispatching from independent threads
+                    # would risk reordering; nothing else depends on typing
+                    # finishing before the next message is handled.
+                    threading.Thread(target=dispatch_input, args=(data,), daemon=True).start()
                 else:
                     dispatch_input(data)
             except Exception:
@@ -1414,12 +1432,24 @@ HTML_PAGE = """
             });
         }
 
-        // One-shot nudge (e.g. "get a frame sooner after this click") — used
-        // as fire-and-forget, independent of the self-pacing loop below.
+        // One-shot nudge (e.g. "get a frame sooner after this click") in
+        // polling mode — used as fire-and-forget, independent of the
+        // self-pacing loop below. In WS mode it means something different:
+        // a manual force-reconnect. Frames there already arrive on their
+        // own ack-paced schedule (an HTTP fetch would just be redundant),
+        // so there's nothing useful this could "nudge" — but a connection
+        // can go silently zombied (readyState still OPEN, but not actually
+        // delivering data — network paths through NAT/tunnels can do this
+        // without ever sending a close frame) without the automatic
+        // onclose-based reconnect ever having a reason to fire. This is the
+        // manual escape hatch for exactly that: the same disconnect+
+        // reconnect sequence already used for transport/rate-mode changes.
         function refreshScreen() {
-            // No-op in WebSocket mode — frames already arrive on their own
-            // ack-paced schedule, so this HTTP fetch would just be redundant.
-            if (transportMode !== 'poll') return;
+            if (transportMode === 'ws') {
+                disconnectWS();
+                connectWS();
+                return;
+            }
             fetchScreenshotOnce();
         }
 
