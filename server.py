@@ -369,6 +369,20 @@ self.addEventListener('fetch', (e) => {
         e.respondWith(
             fetch(e.request)
                 .then((response) => {
+                    if (!response.ok) {
+                        // The proxy answered (Home Assistant is reachable),
+                        // but its own upstream — the Mac itself — didn't
+                        // (502/504 while the tunnel/laptop is down/asleep).
+                        // Don't cache this error page over a previously-good
+                        // shell, and don't serve it either — fall back to
+                        // the last real one, same as an outright network
+                        // failure below. The cached shell's own JS still
+                        // polls /health once it loads, which already
+                        // reports "Mac unreachable" for exactly this case —
+                        // no separate offline view needed, just not
+                        // clobbering the real one with a proxy error page.
+                        return caches.match(e.request).then((cached) => cached || response);
+                    }
                     const copy = response.clone();
                     // waitUntil keeps the worker alive for this write — without
                     // it the browser can terminate the worker right after the
