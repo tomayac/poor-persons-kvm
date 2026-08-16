@@ -1122,7 +1122,7 @@ HTML_PAGE = """
         button.active { background: #2a63c9; border-color: #2a63c9; }
         #arrowGroup {
             display: inline-grid;
-            grid-template-areas: ".    up    ." "left down right";
+            grid-template-areas: "pgup up pgdn" "left down right";
             grid-template-columns: repeat(3, 1fr);
             gap: 4px;
             /* Grows like the surrounding buttons, but doesn't shrink below
@@ -1131,7 +1131,10 @@ HTML_PAGE = """
             flex: 1 0 auto;
         }
         #arrowGroup button { padding: 8px; min-width: 40px; }
+        #arrowGroup button.small { font-size: 11px; padding: 8px 2px; }
+        .arrow-pgup { grid-area: pgup; }
         .arrow-up { grid-area: up; }
+        .arrow-pgdn { grid-area: pgdn; }
         .arrow-left { grid-area: left; }
         .arrow-down { grid-area: down; }
         .arrow-right { grid-area: right; }
@@ -1242,7 +1245,9 @@ HTML_PAGE = """
         <button data-key="tab">Tab</button>
         <button data-key="escape">Esc</button>
         <div id="arrowGroup">
+            <button class="arrow-pgup small" data-key="pageup">PgUp</button>
             <button class="arrow-up" data-key="up">&uarr;</button>
+            <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
             <button class="arrow-left" data-key="left">&larr;</button>
             <button class="arrow-down" data-key="down">&darr;</button>
             <button class="arrow-right" data-key="right">&rarr;</button>
