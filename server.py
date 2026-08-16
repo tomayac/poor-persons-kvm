@@ -1201,10 +1201,25 @@ HTML_PAGE = """
             flex: 1 0 auto; max-height: 140px;
         }
         #textInput, #sendText { font-size: 16px; }
+        /* Wraps just the textarea (not #sendText) so the clear button can be
+           positioned inside its bounds, top-right — vertically centering it
+           like a single-line <input type="search">'s native clear button
+           would look wrong once this field grows tall (see #textRow above).
+           flex:1 moves here from #textInput itself; default align-items on
+           a flex container is stretch, so the single child (the textarea)
+           still fills the wrapper's full height same as before. */
+        #textInputWrap { position: relative; flex: 1; display: flex; }
         #textInput {
-            flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #555;
+            flex: 1; padding: 12px; padding-right: 34px; border-radius: 6px; border: 1px solid #555;
             background: #222; color: #eee; font-family: inherit; resize: none;
         }
+        #clearTextBtn {
+            display: none; /* toggled via JS — only shown once there's text to clear, matching input type="search" */
+            position: absolute; top: 6px; right: 6px; width: 22px; height: 22px;
+            align-items: center; justify-content: center; padding: 0;
+            border: none; border-radius: 50%; background: #444; color: #ccc; font-size: 15px; line-height: 1;
+        }
+        #clearTextBtn:active { background: #555; }
         #sendText { padding: 12px 20px; }
     </style>
 </head>
@@ -1265,7 +1280,10 @@ HTML_PAGE = """
         <button id="doubleClickBtn">Double Click</button>
     </div>
     <div id="textRow">
-        <textarea id="textInput" placeholder="Type here, then Send"></textarea>
+        <div id="textInputWrap">
+            <textarea id="textInput" placeholder="Type here, then Send"></textarea>
+            <button id="clearTextBtn" type="button" aria-label="Clear text">&times;</button>
+        </div>
         <button id="sendText">Send</button>
     </div>
     <div id="controls">
@@ -1943,11 +1961,27 @@ HTML_PAGE = """
             btn.addEventListener('pointerleave', cancelLongPress);
         });
 
+        const textInput = document.getElementById('textInput');
+        const clearTextBtn = document.getElementById('clearTextBtn');
+        // .value = '' (programmatic, e.g. after sending or the clear button
+        // itself) doesn't fire a real 'input' event the way the user
+        // actually typing does — so this needs to be called explicitly
+        // everywhere the value changes, not just left to the listener below.
+        function updateClearBtnVisibility() {
+            clearTextBtn.style.display = textInput.value ? 'flex' : 'none';
+        }
+        textInput.addEventListener('input', updateClearBtnVisibility);
+        clearTextBtn.addEventListener('click', () => {
+            textInput.value = '';
+            updateClearBtnVisibility();
+            textInput.focus();
+        });
+
         document.getElementById('sendText').addEventListener('click', () => {
-            const input = document.getElementById('textInput');
-            if (!input.value) return;
-            sendInput('text', { text: input.value }).then(() => {
-                input.value = '';
+            if (!textInput.value) return;
+            sendInput('text', { text: textInput.value }).then(() => {
+                textInput.value = '';
+                updateClearBtnVisibility();
                 setTimeout(refreshScreen, 150);
             });
         });
