@@ -66,6 +66,36 @@ WS_SLOW_INTERVAL = float(os.environ.get("KVM_WS_SLOW_INTERVAL", "2.0"))
 # connections are caught by ws.send() itself failing, not this.
 MAX_FRAME_ACK_WAIT = 5.0
 
+# Fixed resolution choices, keyed by the value the client's <select> sends —
+# each a cap on the image's longer edge in pixels (aspect-preserving);
+# "full" (None) sends the capture untouched. "auto" isn't in here: it's not
+# a single value but a live, per-connection choice the WS frame sender
+# steps between at runtime — see AUTO_RESOLUTION_TIERS below.
+RESOLUTION_TIERS = {
+    "full": None,
+    "2560": 2560,
+    "1920": 1920,
+    "1280": 1280,
+}
+# Same idea, ordered best (index 0, full res) to worst, for "auto" mode to
+# step through. Only meaningful over WS, which has a persistent connection
+# to adapt over time; polling's "auto" just means "full" (see /screenshot)
+# — polling already gets simpler treatment than WS throughout this app
+# (e.g. no staleness detection, no ack-gated pacing), and building a second,
+# independent adaptive mechanism for it wasn't worth it given WS is the
+# default transport.
+AUTO_RESOLUTION_TIERS = [None, 2560, 1920, 1280, 854]
+# A real frame's full round trip (capture + resize + hash + encode +
+# network + client ack) beyond this suggests the connection is struggling —
+# step down a tier. Comfortably under this for several frames in a row
+# suggests there's headroom to try stepping back up. Capture alone is
+# ~250-300ms on this machine regardless of resolution (measured; it's not
+# something resizing affects), so these thresholds have to sit meaningfully
+# above that floor rather than close to zero.
+AUTO_STEP_DOWN_S = 0.9
+AUTO_STEP_UP_S = 0.4
+AUTO_STEP_UP_STREAK = 5
+
 # cmd/alt are Mac-friendly aliases for pyautogui's actual key names.
 KEY_ALIASES = {
     "cmd": "command",
@@ -100,23 +130,41 @@ def pag(fn, *args, **kwargs):
 # capture itself is serialized.
 screenshot_lock = threading.Lock()
 
-# The client maps clicks to the screenshot image's own pixel dimensions
-# (naturalWidth/naturalHeight — physical pixels), but pyautogui.moveTo()
-# expects logical points (pyautogui.size()). On a non-Retina display, or
-# under some Retina configurations, those happen to be equal and this never
-# matters; on a true 2x Retina display they're not (e.g. a 3420x2224
-# screenshot on a 1710x1112-point screen), and clicks land at roughly double
-# the intended distance from the top-left with no scaling correction.
-# Updated every capture rather than queried separately (a second
-# pyautogui.screenshot() per click would be far too slow) — falls back to
-# assuming 1:1 (no scaling) until the first frame's been captured.
+# The client maps clicks to the streamed image's own pixel dimensions
+# (naturalWidth/naturalHeight), but pyautogui.moveTo() expects logical
+# points (pyautogui.size()). Those are equal on a non-Retina display or at
+# "full" resolution on some Retina configurations, but not on a true 2x
+# Retina display sending anything less than full res (e.g. a 3420x2224
+# capture resized to 1920 wide for a 1710x1112-point screen) — without a
+# scaling correction, clicks land at the wrong distance from the top-left.
+# Updated only by resize_for_stream() below, i.e. only for frames actually
+# sent to the client for display — deliberately NOT inside take_screenshot()
+# itself, since /health also calls that (to verify capture works at all)
+# independent of whatever resolution the video stream is currently using;
+# if it updated this too, a health poll landing between two real frames
+# would transiently clobber it back to native size and briefly send clicks
+# to the wrong place whenever streaming below full resolution.
 _last_screenshot_size = None
 
 
 def take_screenshot():
-    global _last_screenshot_size
     with screenshot_lock:
-        img = pag(pyautogui.screenshot)
+        return pag(pyautogui.screenshot)
+
+
+def resize_for_stream(img, max_dim):
+    """Downscale img so its longer edge is at most max_dim px (aspect
+    preserving) before it's actually hashed/encoded/sent to the client —
+    "full" resolution (max_dim=None) or an already-smaller capture is a
+    no-op. Always updates _last_screenshot_size to match, since that's what
+    scale_to_screen() needs — see its comment for why this must be the only
+    place that happens.
+    """
+    global _last_screenshot_size
+    if max_dim is not None and max(img.size) > max_dim:
+        ratio = max_dim / max(img.size)
+        new_size = (round(img.width * ratio), round(img.height * ratio))
+        img = img.resize(new_size, Image.LANCZOS)
     _last_screenshot_size = img.size
     return img
 
@@ -548,6 +596,11 @@ def screenshot():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+    # "auto" isn't handled per-request here the way WS's frame sender does
+    # it over its persistent connection — see AUTO_RESOLUTION_TIERS' comment
+    # — so it, and any unrecognized value, just means "full".
+    img = resize_for_stream(img, RESOLUTION_TIERS.get(request.args.get("resolution"), None))
+
     etag = frame_hash(img)
     # Cache-Control: no-cache means "always ask the server first" (not "don't
     # cache") — the browser sends If-None-Match on every poll, so an
@@ -801,22 +854,44 @@ def ws_handler(ws):
     "is the pipe responsive right now" independent of capture cost, which
     is what the staleness overlay needs and frame_ack pacing doesn't
     directly tell you (frame_ack round trips include capture time too).
+
+    "?resolution=" picks how large each captured frame is before it's
+    hashed/encoded/sent — "full" or a fixed pixel cap (see RESOLUTION_TIERS),
+    or "auto" (the default) to have frame_sender itself step between tiers
+    based on how long each frame's actual round trip is taking (see
+    AUTO_RESOLUTION_TIERS). Read once here at connect time for the fixed
+    tiers (changing it client-side means reconnecting, same as a rate-mode
+    change), but "auto" is re-evaluated by frame_sender on every frame.
     """
     rate_mode = request.args.get("rate", "optimal")
+    resolution_mode = request.args.get("resolution", "auto")
     stop = threading.Event()
     ack_event = threading.Event()
     send_lock = threading.Lock()  # ws.send() isn't safe to call from two threads at once
 
     def frame_sender():
         last_hash = None
+        auto_tier_idx = 0  # index into AUTO_RESOLUTION_TIERS; 0 = full res
+        auto_fast_streak = 0
         while not stop.is_set():
+            frame_start = time.time()
+            sent_real_frame = False
             try:
                 img = take_screenshot()
+                if resolution_mode == "auto":
+                    max_dim = AUTO_RESOLUTION_TIERS[auto_tier_idx]
+                else:
+                    max_dim = RESOLUTION_TIERS.get(resolution_mode)
+                img = resize_for_stream(img, max_dim)
                 h = frame_hash(img)
                 if h == last_hash:
                     # Screen hasn't changed — skip encoding entirely and send
                     # a tiny marker instead of re-transferring an identical
-                    # image. Still counts as this cycle's "frame" for pacing.
+                    # image. Still counts as this cycle's "frame" for pacing,
+                    # but NOT for auto-resolution timing below: an unchanged
+                    # marker is tiny regardless of resolution, so its round
+                    # trip reflects latency, not the payload-size question
+                    # auto-resolution is actually trying to answer.
                     with send_lock:
                         ws.send(json.dumps({"type": "unchanged"}))
                 else:
@@ -824,10 +899,25 @@ def ws_handler(ws):
                     with send_lock:
                         ws.send(data)
                     last_hash = h
+                    sent_real_frame = True
             except Exception:
                 break
             ack_event.clear()
             ack_event.wait(timeout=MAX_FRAME_ACK_WAIT)
+
+            if resolution_mode == "auto" and sent_real_frame:
+                elapsed = time.time() - frame_start
+                if elapsed > AUTO_STEP_DOWN_S and auto_tier_idx < len(AUTO_RESOLUTION_TIERS) - 1:
+                    auto_tier_idx += 1
+                    auto_fast_streak = 0
+                elif elapsed < AUTO_STEP_UP_S:
+                    auto_fast_streak += 1
+                    if auto_fast_streak >= AUTO_STEP_UP_STREAK and auto_tier_idx > 0:
+                        auto_tier_idx -= 1
+                        auto_fast_streak = 0
+                else:
+                    auto_fast_streak = 0
+
             if rate_mode == "slow":
                 stop.wait(WS_SLOW_INTERVAL)
 
@@ -1112,6 +1202,15 @@ HTML_PAGE = """
                     <option value="slow">Fixed interval</option>
                 </select>
             </label>
+            <label>Resolution
+                <select id="resolutionMode">
+                    <option value="auto" selected>Adapts to connection speed (optimal)</option>
+                    <option value="full">Full (native)</option>
+                    <option value="2560">Up to 2560px</option>
+                    <option value="1920">Up to 1920px</option>
+                    <option value="1280">Up to 1280px</option>
+                </select>
+            </label>
             <button id="logoutBtn">Log Out</button>
             <!-- TEMP DEBUG: safe-area diagnostics, remove once the Android clipping issue is confirmed fixed -->
             <pre id="debugInfo"></pre>
@@ -1315,6 +1414,12 @@ HTML_PAGE = """
         // loop below). 'slow': adds a deliberate floor on top, for when
         // conserving bandwidth matters more than freshness.
         let rateMode = 'optimal';
+        // 'auto': the server itself adapts the streamed resolution to how
+        // long frames are actually taking to round-trip (see
+        // AUTO_RESOLUTION_TIERS server-side) — orthogonal to rateMode,
+        // which picks the encoder, not the pixel dimensions. Fixed values
+        // match RESOLUTION_TIERS' keys server-side.
+        let resolutionMode = 'auto';
         const SLOW_INTERVAL_MS = 2000; // mirrors the server's WS_SLOW_INTERVAL default
         let ws = null;
         let wsFrameUrl = null; // current blob: URL backing the <img>, for revocation
@@ -1354,7 +1459,7 @@ HTML_PAGE = """
         function connectWS() {
             if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode);
+            ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode + '&resolution=' + resolutionMode);
             ws.binaryType = 'blob';
             ws.onopen = () => { wsReconnectDelay = 1000; };
             function sendFrameAck() {
@@ -1428,7 +1533,7 @@ HTML_PAGE = """
                 // costs a small 304 instead of a full image transfer +
                 // decode. A unique URL every request would defeat that
                 // entirely (never match anything to revalidate against).
-                next.src = '/screenshot?token=' + TOKEN + '&rate=' + rateMode;
+                next.src = '/screenshot?token=' + TOKEN + '&rate=' + rateMode + '&resolution=' + resolutionMode;
             });
         }
 
@@ -1742,6 +1847,19 @@ HTML_PAGE = """
             // WS reads its rate mode once at connect time (?rate=...), so a
             // running connection needs to be reopened to pick up the change.
             // Polling's loop just reads the shared variable on its next tick.
+            if (transportMode === 'ws' && ws) {
+                disconnectWS();
+                connectWS();
+            }
+        });
+
+        document.getElementById('resolutionMode').addEventListener('change', (e) => {
+            resolutionMode = e.target.value;
+            // Same reasoning as rateMode above — WS only reads this at
+            // connect time (frame_sender re-evaluates "auto" itself every
+            // frame once connected, but a *fixed* tier change still needs a
+            // fresh connection to take effect); polling just reads it fresh
+            // on its next request.
             if (transportMode === 'ws' && ws) {
                 disconnectWS();
                 connectWS();
