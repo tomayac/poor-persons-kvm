@@ -1120,6 +1120,16 @@ HTML_PAGE = """
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
         button.active { background: #2a63c9; border-color: #2a63c9; }
+        /* Marks buttons that support the long-press-for-Ctrl gesture (see
+           the pointerdown/pointerup handling below) — a small corner dot
+           rather than anything that'd change the button's own size, matching
+           the same [data-key^="cmd+"] selection the JS uses so any future
+           Cmd+ button picks this up automatically too. */
+        #controls button[data-key^="cmd+"] { position: relative; }
+        #controls button[data-key^="cmd+"]::after {
+            content: ''; position: absolute; top: 4px; right: 4px;
+            width: 5px; height: 5px; border-radius: 50%; background: #6cb2ff;
+        }
         #arrowGroup {
             display: inline-grid;
             grid-template-areas: "pgup up pgdn" "left down right";
@@ -1861,10 +1871,52 @@ HTML_PAGE = """
             fullscreenBtn.textContent = document.fullscreenElement ? 'Exit' : 'Fullscreen';
         });
 
+        const LONG_PRESS_MS = 500;
+
         document.querySelectorAll('#controls button[data-key]').forEach(btn => {
-            btn.addEventListener('click', () => {
-                sendInput('key', { key: btn.dataset.key }).then(() => setTimeout(refreshScreen, 150));
+            const key = btn.dataset.key;
+            const ctrlVariant = key.startsWith('cmd+') ? 'ctrl+' + key.slice(4) : null;
+
+            function sendKey(combo) {
+                sendInput('key', { key: combo }).then(() => setTimeout(refreshScreen, 150));
+            }
+
+            if (!ctrlVariant) {
+                btn.addEventListener('click', () => sendKey(key));
+                return;
+            }
+
+            // Long-press sends the Ctrl equivalent instead of Cmd — a quick
+            // way to reach e.g. Ctrl+C in a terminal without a Settings
+            // trip, since which modifier you actually want depends on
+            // whatever's focused on the Mac right now, not something worth
+            // a persistent setting. preventDefault on pointerdown stops the
+            // browser's own synthetic click from also firing afterward and
+            // sending the plain Cmd version a second time.
+            let longPressTimer = null;
+            let longPressFired = false;
+
+            function cancelLongPress() {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+                btn.classList.remove('active');
+            }
+
+            btn.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                longPressFired = false;
+                longPressTimer = setTimeout(() => {
+                    longPressFired = true;
+                    btn.classList.add('active'); // held-down-style highlight, confirms the Ctrl variant is about to fire
+                    sendKey(ctrlVariant);
+                }, LONG_PRESS_MS);
             });
+            btn.addEventListener('pointerup', () => {
+                const wasLongPress = longPressFired;
+                cancelLongPress();
+                if (!wasLongPress) sendKey(key);
+            });
+            btn.addEventListener('pointercancel', cancelLongPress);
+            btn.addEventListener('pointerleave', cancelLongPress);
         });
 
         document.getElementById('sendText').addEventListener('click', () => {
