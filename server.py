@@ -740,21 +740,53 @@ def do_scroll(dx, dy):
         pag(pyautogui.hscroll, dx)
 
 
+def _post_unicode_char(char):
+    """Post one character directly via its Unicode value, bypassing physical
+    key/modifier simulation entirely — see do_text() for why this replaced
+    pyautogui.typewrite() for actual text content. The keycode argument (0)
+    is irrelevant/unused once CGEventKeyboardSetUnicodeString overrides what
+    character the event actually carries; it still needs *some* valid
+    keycode to construct the event object at all.
+    """
+    down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+    Quartz.CGEventKeyboardSetUnicodeString(down, len(char), char)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+    up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+    Quartz.CGEventKeyboardSetUnicodeString(up, len(char), char)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+
+
 def do_text(text):
     if not text:
         return
     with input_lock:
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            if line:
-                pag(pyautogui.typewrite, line, interval=0.01)
+            for char in line:
+                # pyautogui.typewrite() was posting a real physical Shift
+                # key press/release around *every individual* uppercase
+                # letter or shifted symbol (!@#$%^&*()_+{}|:"<>? — see
+                # pyautogui's isShiftCharacter) rather than just once across
+                # a run of them — so any normal sentence (capital letters,
+                # punctuation) posted a burst of Shift down/up toggles in
+                # rapid succession. That's suspected to be exactly what was
+                # tripping some macOS modifier-key accessibility heuristic
+                # (Dictation and/or Sticky Keys both key off repeated
+                # taps of a single modifier) partway through typing a
+                # message. Posting each character directly by its Unicode
+                # value sidesteps physical modifier simulation for text
+                # content entirely — there's simply no Shift event to
+                # mis-trigger anything with.
+                pag(_post_unicode_char, char)
+                time.sleep(0.01)
             if i < len(lines) - 1:
-                # pyautogui.typewrite()'s own mapping for an embedded \n is a
-                # plain Enter, which most chat-style apps (Slack, Discord,
-                # Messages, ...) read as "submit" — splitting one multi-line
-                # message into several separate ones instead of inserting a
-                # line break within it. Shift+Enter is the common convention
-                # across those apps for a literal line break without submitting.
+                # A line break is a real functional keystroke, not text
+                # content, so this still goes through a physical key combo
+                # rather than _post_unicode_char — a single Shift toggle per
+                # line break isn't the rapid-repeat pattern above; plain
+                # Enter here would submit in most chat-style apps (Slack,
+                # Discord, Messages, ...) instead of inserting a line break,
+                # which Shift+Enter is the common convention for avoiding.
                 pag(pyautogui.hotkey, "shift", "enter")
 
 
