@@ -1893,12 +1893,15 @@ HTML_PAGE = """
             // a persistent setting. preventDefault on pointerdown stops the
             // browser's own synthetic click from also firing afterward and
             // sending the plain Cmd version a second time.
+            const label = btn.textContent;
+            const ctrlLabel = label.replace('Cmd+', 'Ctrl+');
             let longPressTimer = null;
             let longPressFired = false;
 
             function cancelLongPress() {
                 if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
                 btn.classList.remove('active');
+                btn.textContent = label;
             }
 
             btn.addEventListener('pointerdown', (e) => {
@@ -1907,6 +1910,7 @@ HTML_PAGE = """
                 longPressTimer = setTimeout(() => {
                     longPressFired = true;
                     btn.classList.add('active'); // held-down-style highlight, confirms the Ctrl variant is about to fire
+                    btn.textContent = ctrlLabel;
                     sendKey(ctrlVariant);
                 }, LONG_PRESS_MS);
             });
