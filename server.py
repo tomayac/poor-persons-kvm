@@ -147,9 +147,68 @@ def local_ip():
 
 @app.before_request
 def check_auth():
+    # /offline.html is intentionally reachable with no token at all — it
+    # reveals nothing (static "can't reach Home Assistant" markup, no screen
+    # data or control), and the service worker needs to be able to precache
+    # and serve it unconditionally, including on a device that's never
+    # actually completed the token check.
+    if request.path == "/offline.html":
+        return
     token = request.args.get("token") or request.headers.get("X-Auth-Token")
     if not token or not hmac.compare_digest(token, AUTH_TOKEN):
         abort(401)
+
+
+# Served with no auth check at all (see check_auth's exemption below) and
+# precached by the service worker's install handler, so it's available even
+# on a device that's never successfully reached the token check — the whole
+# point is being reachable when literally nothing else is. Distinct from the
+# real app shell's own "Mac unreachable" state (which needs Home Assistant
+# itself to be up, just not the Mac) — this is what the service worker falls
+# back to specifically when the network request itself fails outright, i.e.
+# Home Assistant isn't reachable either.
+OFFLINE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APP_TITLE_PLACEHOLDER — Offline</title>
+    <style>
+        body {
+            margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 10px; text-align: center; padding: 24px;
+            background: #111; color: #eee; font-family: -apple-system, sans-serif;
+        }
+        b { font-size: 17px; }
+        p { color: #999; font-size: 13px; margin: 0; max-width: 320px; }
+        button {
+            margin-top: 8px; padding: 10px 20px; border-radius: 6px; border: 1px solid #555;
+            background: #2a63c9; border-color: #2a63c9; color: #fff; font-size: 15px;
+        }
+    </style>
+</head>
+<body>
+    <b>⚠ Can't reach Home Assistant</b>
+    <p>Check this device's internet connection. This page will reload on its own once it's back — or tap below to try right now.</p>
+    <button id="retryBtn">Retry now</button>
+    <script>
+        document.getElementById('retryBtn').addEventListener('click', () => location.reload());
+        // Reloading (rather than probing connectivity separately) is the
+        // simplest reliable check here: the service worker's own fetch
+        // handler already knows how to route a successful reload to
+        // whichever state is actually correct (the real app, or "Mac
+        // unreachable" if just Home Assistant is up) — this page doesn't
+        // need to duplicate that logic, just retry until one of those
+        // succeeds. navigator.onLine only reflects the local network
+        // interface, not real internet reachability (e.g. Wi-Fi connected
+        // but the router itself has no uplink), so the periodic retry is
+        // the real safety net; 'online' is just a fast path when it fires.
+        window.addEventListener('online', () => location.reload());
+        setInterval(() => location.reload(), 10000);
+    </script>
+</body>
+</html>
+"""
 
 
 LOGIN_SHELL_HTML = """
@@ -237,6 +296,12 @@ def index():
         .replace("APP_TITLE_PLACEHOLDER", app_title())
         .replace("APP_SHORT_TITLE_PLACEHOLDER", app_short_title())
     )
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/offline.html")
+def offline():
+    html = OFFLINE_HTML.replace("APP_TITLE_PLACEHOLDER", app_title())
     return Response(html, mimetype="text/html")
 
 
@@ -353,15 +418,26 @@ def service_worker():
     # listens for the resulting controllerchange and reloads itself so an
     # update is never silently stuck on old JS.
     js = """
-const CACHE_NAME = 'kvm-shell-v1';
-const SHELL_PATHS = ['/', '/manifest.json', '/sw.js'];
+const CACHE_NAME = 'kvm-shell-v2';
+const SHELL_PATHS = ['/', '/manifest.json', '/sw.js', '/offline.html'];
 
 function isShellRequest(url) {
     const path = new URL(url).pathname;
     return SHELL_PATHS.includes(path) || path.startsWith('/static/');
 }
 
-self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('install', (e) => {
+    // Precached unconditionally (not lazily on first successful fetch like
+    // the rest of the shell below) so it's available even on a device that
+    // has never once loaded the app while genuinely online — the whole
+    // point of this page is being there when nothing else works. If this
+    // very fetch fails (installing while already offline), the install
+    // itself fails and the standard SW lifecycle just retries on a later
+    // visit — nothing more to do about that here.
+    e.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.add('/offline.html')).then(() => self.skipWaiting())
+    );
+});
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('fetch', (e) => {
@@ -390,7 +466,19 @@ self.addEventListener('fetch', (e) => {
                     e.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(e.request, copy)));
                     return response;
                 })
-                .catch(() => caches.match(e.request))
+                .catch(() => {
+                    // fetch() itself rejected — no HTTP response at all,
+                    // meaning Home Assistant isn't reachable either (not
+                    // just the Mac, handled above via response.ok). The
+                    // cached real shell can't do anything useful here (no
+                    // health polling or WS reconnect target exists at all
+                    // without a network path), so this is the dedicated
+                    // "can't reach Home Assistant" page, precached on
+                    // install for exactly this case, rather than a
+                    // fully-interactive-looking shell that would just fail
+                    // every single action.
+                    return caches.match('/offline.html').then((offline) => offline || new Response('Offline', { status: 503 }));
+                })
         );
         return;
     }
