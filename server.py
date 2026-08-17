@@ -246,6 +246,7 @@ OFFLINE_HTML = """
         button {
             margin-top: 8px; padding: 10px 20px; border-radius: 6px; border: 1px solid #555;
             background: #2a63c9; border-color: #2a63c9; color: #fff; font-size: 15px;
+            user-select: none; -webkit-user-select: none;
         }
     </style>
 </head>
@@ -287,7 +288,7 @@ LOGIN_SHELL_HTML = """
         form { display: flex; flex-direction: column; gap: 12px; width: min(90vw, 360px); }
         input, button { padding: 10px 12px; border-radius: 6px; border: 1px solid #555; font-size: 15px; }
         input { background: #222; color: #eee; }
-        button { background: #2a63c9; color: #fff; border-color: #2a63c9; }
+        button { background: #2a63c9; color: #fff; border-color: #2a63c9; user-select: none; -webkit-user-select: none; }
         p { color: #999; font-size: 13px; margin: 0; }
     </style>
 </head>
@@ -1182,6 +1183,7 @@ HTML_PAGE = """
         }
         #scrollWheel.active { background: #2a63c9; border-color: #2a63c9; color: #fff; }
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+        button { user-select: none; -webkit-user-select: none; }
         button:active { background: #555; }
         button.active { background: #2a63c9; border-color: #2a63c9; }
         /* Marks buttons that support the long-press-for-Ctrl gesture (see
