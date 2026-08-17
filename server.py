@@ -1346,7 +1346,21 @@ HTML_PAGE = """
         localStorage.setItem('kvmToken', TOKEN);
 
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js?token=' + TOKEN).catch(() => {});
+            navigator.serviceWorker.register('/sw.js?token=' + TOKEN).then((reg) => {
+                // The browser's own update checks are otherwise infrequent
+                // (roughly once per 24h, and only triggered by a fresh
+                // navigation) — far too slow for a tool that's actively
+                // being iterated on, especially for an installed PWA that
+                // might sit open/backgrounded for days without a real
+                // navigation ever happening. Force a check now, and again
+                // whenever the app is reopened, so a server-side fix
+                // actually reaches an already-installed PWA promptly
+                // instead of silently waiting on the browser's own timer.
+                reg.update().catch(() => {});
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'visible') reg.update().catch(() => {});
+                });
+            }).catch(() => {});
             // controllerchange fires both when a SW first claims this page
             // (right after install — not an update, don't reload) and when a
             // *new* SW version takes over from a previous one (a genuine
