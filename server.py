@@ -1148,18 +1148,21 @@ HTML_PAGE = """
         #staleOverlay.active { opacity: 1; pointer-events: auto; }
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
-        #controls {
+        #bottomBar {
             /* No block padding — see #clickRow below for why. Its own
                bottom safe-area inset becomes margin instead of padding for
                the same reason (and margins don't collapse between flex
                siblings, so this is exactly equivalent to the old
                padding-bottom). */
-            display: flex; flex-wrap: wrap; gap: 6px; padding-inline: 8px; background: #111;
+            display: flex; align-items: stretch; gap: 6px; padding-inline: 8px; background: #111;
             margin-block-end: max(8px, env(safe-area-inset-bottom, 8px));
             /* Same width capping as #topbar — full width up to a real
                device's width, centered beyond that. Its buttons grow to
                fill it, same as the top bar's (below). */
             width: 100%; max-width: 851px; margin-left: auto; margin-right: auto;
+        }
+        #controls {
+            display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0;
         }
         #controls > button { flex: 1 1 auto; }
         @media (min-width: 600px) {
@@ -1168,6 +1171,16 @@ HTML_PAGE = """
                safety net in case it still doesn't quite fit. */
             #controls { flex-wrap: nowrap; overflow-x: auto; }
         }
+        #scrollWheel {
+            /* A vertical drag strip for touch scrolling, sitting right of
+               #controls — mirrors what a real mouse wheel already does via
+               the wheel listener on #screenWrap below. */
+            flex: 0 0 40px; display: flex; flex-direction: column; align-items: center;
+            justify-content: space-between; background: #333; color: #888;
+            border: 1px solid #555; border-radius: 6px; padding: 8px 0;
+            touch-action: none; user-select: none; -webkit-user-select: none; cursor: ns-resize;
+        }
+        #scrollWheel.active { background: #2a63c9; border-color: #2a63c9; color: #fff; }
         button, select { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
         button:active { background: #555; }
         button.active { background: #2a63c9; border-color: #2a63c9; }
@@ -1318,23 +1331,29 @@ HTML_PAGE = """
         </div>
         <button id="sendText">Send</button>
     </div>
-    <div id="controls">
-        <button data-key="enter">Enter</button>
-        <button data-key="backspace">Backspace</button>
-        <button data-key="tab">Tab</button>
-        <button data-key="escape">Esc</button>
-        <div id="arrowGroup">
-            <button class="arrow-pgup small" data-key="pageup">PgUp</button>
-            <button class="arrow-up" data-key="up">&uarr;</button>
-            <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
-            <button class="arrow-left" data-key="left">&larr;</button>
-            <button class="arrow-down" data-key="down">&darr;</button>
-            <button class="arrow-right" data-key="right">&rarr;</button>
+    <div id="bottomBar">
+        <div id="controls">
+            <button data-key="enter">Enter</button>
+            <button data-key="backspace">Backspace</button>
+            <button data-key="tab">Tab</button>
+            <button data-key="escape">Esc</button>
+            <div id="arrowGroup">
+                <button class="arrow-pgup small" data-key="pageup">PgUp</button>
+                <button class="arrow-up" data-key="up">&uarr;</button>
+                <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
+                <button class="arrow-left" data-key="left">&larr;</button>
+                <button class="arrow-down" data-key="down">&darr;</button>
+                <button class="arrow-right" data-key="right">&rarr;</button>
+            </div>
+            <button data-key="cmd+c">Cmd+C</button>
+            <button data-key="cmd+v">Cmd+V</button>
+            <button data-key="cmd+z">Cmd+Z</button>
+            <button data-key="cmd+tab">Cmd+Tab</button>
         </div>
-        <button data-key="cmd+c">Cmd+C</button>
-        <button data-key="cmd+v">Cmd+V</button>
-        <button data-key="cmd+z">Cmd+Z</button>
-        <button data-key="cmd+tab">Cmd+Tab</button>
+        <div id="scrollWheel" aria-label="Scroll">
+            <span aria-hidden="true">&uarr;</span>
+            <span aria-hidden="true">&darr;</span>
+        </div>
     </div>
 
     <script>
@@ -1836,6 +1855,35 @@ HTML_PAGE = """
             if (activePointers.size > 0) return;
             sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
         }, { passive: false });
+
+        // Virtual scroll wheel: drag distance becomes 'scroll' input, same
+        // as the real wheel listener above. dy is (previous Y - current Y)
+        // so dragging a finger up yields positive dy, matching the sign
+        // convention of a real trackpad's "natural scrolling" deltaY —
+        // consistent with the desktop wheel listener's direct e.deltaY pass-through.
+        const scrollWheel = document.getElementById('scrollWheel');
+        let scrollWheelPointerId = null;
+        let scrollWheelLastY = 0;
+        scrollWheel.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            scrollWheelPointerId = e.pointerId;
+            scrollWheelLastY = e.clientY;
+            scrollWheel.setPointerCapture(e.pointerId);
+            scrollWheel.classList.add('active');
+        });
+        scrollWheel.addEventListener('pointermove', (e) => {
+            if (e.pointerId !== scrollWheelPointerId) return;
+            const dy = Math.round(scrollWheelLastY - e.clientY);
+            scrollWheelLastY = e.clientY;
+            if (dy !== 0) sendInput('scroll', { dx: 0, dy });
+        });
+        function endScrollWheel(e) {
+            if (e.pointerId !== scrollWheelPointerId) return;
+            scrollWheelPointerId = null;
+            scrollWheel.classList.remove('active');
+        }
+        scrollWheel.addEventListener('pointerup', endScrollWheel);
+        scrollWheel.addEventListener('pointercancel', endScrollWheel);
 
         // A long-press on an <img> fires 'contextmenu' (Android's touch
         // equivalent of a right-click) independently of the touch-action/
