@@ -1300,6 +1300,12 @@ HTML_PAGE = """
                     <option value="1280">Up to 1280px</option>
                 </select>
             </label>
+            <label><span>Scroll direction</span>
+                <select id="scrollDirection">
+                    <option value="natural" selected>Natural</option>
+                    <option value="traditional">Traditional</option>
+                </select>
+            </label>
             <button id="logoutBtn">Log Out</button>
         </div>
     </div>
@@ -1544,6 +1550,18 @@ HTML_PAGE = """
                 return Promise.resolve();
             }
             return post('/input/' + type, body);
+        }
+
+        // 'natural': dx/dy forwarded as-is (content follows the drag/wheel
+        // direction, matching this app's original behavior). 'traditional':
+        // both flipped, for anyone who prefers old-school wheel direction on
+        // the remote Mac regardless of what their own device is set to —
+        // the single choke point both scroll sources (the real wheel
+        // listener and the virtual scroll wheel widget) go through.
+        let scrollDirection = 'natural';
+        function sendScroll(dx, dy) {
+            if (scrollDirection === 'traditional') { dx = -dx; dy = -dy; }
+            sendInput('scroll', { dx, dy });
         }
 
         let wsPingTimer = null;
@@ -1853,7 +1871,7 @@ HTML_PAGE = """
             // non-empty is that synthetic echo, not a real trackpad/mouse
             // wheel — only forward when no touch is active.
             if (activePointers.size > 0) return;
-            sendInput('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
+            sendScroll(Math.round(e.deltaX), Math.round(e.deltaY));
         }, { passive: false });
 
         // Virtual scroll wheel: drag distance becomes 'scroll' input, same
@@ -1868,14 +1886,32 @@ HTML_PAGE = """
             e.preventDefault();
             scrollWheelPointerId = e.pointerId;
             scrollWheelLastY = e.clientY;
-            scrollWheel.setPointerCapture(e.pointerId);
+            // A drifting finger easily strays outside this narrow 40px
+            // strip mid-drag; without capture, subsequent pointermove
+            // events stop being routed here at all once that happens.
+            // Same defensive try/catch as the other setPointerCapture call
+            // sites in this file — it can throw on some devices/browsers,
+            // and letting that abort the rest of this handler would also
+            // skip the active-state class and the recentering below.
+            try { scrollWheel.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
             scrollWheel.classList.add('active');
+            // Unlike a click/drag on the video, this widget has no on-screen
+            // position of its own — pyautogui.scroll() always acts on
+            // whatever's currently under the Mac's real cursor, which (if
+            // you haven't tapped the video yet) could be left anywhere from
+            // a previous session. Recentering it here on every drag start
+            // makes the widget reliably scroll "the middle of what I'm
+            // looking at" instead of silently doing nothing useful.
+            const rect = img.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+            sendInput('mousemove', toMacCoords(cx, cy));
+            updateCursorDot(cx, cy);
         });
         scrollWheel.addEventListener('pointermove', (e) => {
             if (e.pointerId !== scrollWheelPointerId) return;
             const dy = Math.round(scrollWheelLastY - e.clientY);
             scrollWheelLastY = e.clientY;
-            if (dy !== 0) sendInput('scroll', { dx: 0, dy });
+            if (dy !== 0) sendScroll(0, dy);
         });
         function endScrollWheel(e) {
             if (e.pointerId !== scrollWheelPointerId) return;
@@ -1960,6 +1996,10 @@ HTML_PAGE = """
                 disconnectWS();
                 connectWS();
             }
+        });
+
+        document.getElementById('scrollDirection').addEventListener('change', (e) => {
+            scrollDirection = e.target.value;
         });
 
         document.getElementById('resolutionMode').addEventListener('change', (e) => {
