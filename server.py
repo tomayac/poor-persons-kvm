@@ -1316,17 +1316,27 @@ HTML_PAGE = """
         /* Desktop mode (see enterDesktopMode in the script below): a real
            mouse and a real keyboard make most of the touch-oriented UI
            redundant — real buttons replace Left/Right/Double Click, real
-           typing/shortcuts replace the meta-key row, and the real scroll
-           wheel (already forwarded, see the 'wheel' listener below) replaces
-           the on-screen one. What's left is only what a browser can never
-           deliver itself: OS-level shortcuts like Cmd+Tab, which get eaten
-           by the OS before any webpage sees the keydown. Hiding the rest
-           hands that vertical space back to the video, and dropping the
-           851px width cap (originally sized for the widest real *phone*,
-           the unfolded Pixel Fold — see #topbar above) lets the whole UI
-           actually use a desktop browser window's width instead of sitting
-           narrow and centered in the middle of it. */
+           typing/shortcuts replace the meta-key row and text field (Cmd+C/
+           Cmd+V/etc. all work directly from the physical keyboard via the
+           keydown passthrough — nothing button-specific is actually lost
+           there), and the real scroll wheel (already forwarded, see the
+           'wheel' listener below) replaces the on-screen one. What's left
+           is only what a browser can never deliver itself: OS-level
+           shortcuts like Cmd+Tab, which get eaten by the OS before any
+           webpage sees the keydown. Hiding the rest hands that vertical
+           space back to the video, and dropping the 851px width cap
+           (originally sized for the widest real *phone*, the unfolded
+           Pixel Fold — see #topbar above) lets the whole UI actually use a
+           desktop browser window's width instead of sitting narrow and
+           centered in the middle of it.
+
+           One real capability this gives up: Cmd+V via passthrough pastes
+           from the remote Mac's OWN clipboard, not this device's — the
+           text field was the only way to push text FROM this device's
+           clipboard TO the Mac (e.g. a password). Worth knowing if that's
+           ever needed; nothing currently brings it back in desktop mode. */
         body.desktop-mode #clickRow,
+        body.desktop-mode #textRow,
         body.desktop-mode #scrollWheel,
         body.desktop-mode #arrowGroup,
         body.desktop-mode #controls > button:not([data-key="cmd+tab"]) {
