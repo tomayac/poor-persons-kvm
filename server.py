@@ -1161,21 +1161,37 @@ HTML_PAGE = """
         #staleOverlay.active { opacity: 1; pointer-events: auto; }
         #staleOverlay b { font-size: 15px; }
         #staleOverlay span { font-size: 13px; color: #ccc; }
-        #bottomBar {
-            /* No block padding — see #clickRow below for why. Its own
+        #inputPanel {
+            /* Wraps every input row (click buttons, text field, meta keys —
+               stacked in #inputRows) alongside the scroll wheel, which
+               spans their combined height as one tall strip on the side.
+               No block padding — see #clickRow below for why. Its own
                bottom safe-area inset becomes margin instead of padding for
                the same reason (and margins don't collapse between flex
                siblings, so this is exactly equivalent to the old
-               padding-bottom). */
+               padding-bottom); this is now the last element in the stack,
+               so it's the one that needs it (previously that was
+               #bottomBar, before the rows were nested under this wrapper). */
             display: flex; align-items: stretch; gap: 6px; padding-inline: 8px; background: #111;
             margin-block-end: max(8px, env(safe-area-inset-bottom, 8px));
             /* Same width capping as #topbar — full width up to a real
-               device's width, centered beyond that. Its buttons grow to
-               fill it, same as the top bar's (below). */
+               device's width, centered beyond that. */
             width: 100%; max-width: 851px; margin-left: auto; margin-right: auto;
+            /* Grows to absorb whatever vertical space is left over once the
+               video and every fixed-size row have taken what they need —
+               the role #textRow used to play directly at the body level
+               (see #textRow below) — so #textRow's own flex:1 still has
+               real leftover space to grow into once it's nested a level
+               deeper. shrink:0 like the old #clickRow/#bottomBar: never
+               gives way under pressure — #screenCenterer is still the one
+               thing that shrinks. */
+            flex: 1 0 auto;
+        }
+        #inputRows {
+            display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0;
         }
         #controls {
-            display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0;
+            display: flex; flex-wrap: wrap; gap: 6px;
         }
         #controls > button { flex: 1 1 auto; }
         @media (min-width: 600px) {
@@ -1227,14 +1243,11 @@ HTML_PAGE = """
         .arrow-down { grid-area: down; }
         .arrow-right { grid-area: right; }
         #clickRow {
-            /* No padding at the block start/content sides — it sits flush
-               against the video above it; margin-block-end is the only
-               vertical space it adds, and only after itself. Halves the old
-               "padding-bottom of this row + padding-top of the next" gap
-               down to a single 8px, and keeps the amount of space between
-               rows visually the same as the gap between buttons within a
-               row. */
-            display: flex; gap: 8px; padding-inline: 8px; margin-block-end: 8px; background: #111;
+            /* No side/block padding of its own — #inputPanel's
+               padding-inline handles the left/right gutter for the whole
+               stack, and #inputRows' gap handles the space between rows
+               (matches the gap between buttons within a row). */
+            display: flex; gap: 8px; background: #111;
         }
         #clickRow button {
             flex: 1; padding: 16px; font-size: 15px; font-weight: 600;
@@ -1242,21 +1255,21 @@ HTML_PAGE = """
         }
         #clickRow button.held { background: #2a63c9; border-color: #2a63c9; }
         #textRow {
-            /* Same reasoning as #clickRow above — no block padding, just
-               margin-block-end — plus this row's extra height goes entirely
-               into #textInput/#sendText growing taller (align-items'
-               default "stretch" fills whatever height this row ends up
-               with). */
-            display: flex; gap: 6px; padding-inline: 8px; margin-block-end: 8px; background: #111;
+            /* Same reasoning as #clickRow above — no side padding of its
+               own — plus this row's extra height goes entirely into
+               #textInput/#sendText growing taller (align-items' default
+               "stretch" fills whatever height this row ends up with). */
+            display: flex; gap: 6px; background: #111;
             /* The one row that grows: it soaks up whatever vertical space is
                left over once the video and every other (fixed-size) row have
-               taken exactly what they need — see #screenCenterer above.
-               flex-shrink: 0 keeps it from ever getting squeezed below its
-               own natural size; on a deficit, #screenCenterer gives way
-               first. max-height stops it from ballooning on narrow/tall
-               viewports where the topbar and controls wrap to multiple lines
-               and leave a lot of leftover space — comfortably roomy without
-               turning into an oversized single-line input. */
+               taken exactly what they need — see #screenCenterer and
+               #inputPanel above. flex-shrink: 0 keeps it from ever getting
+               squeezed below its own natural size; on a deficit,
+               #screenCenterer gives way first. max-height stops it from
+               ballooning on narrow/tall viewports where the topbar and
+               controls wrap to multiple lines and leave a lot of leftover
+               space — comfortably roomy without turning into an oversized
+               single-line input. */
             flex: 1 0 auto; max-height: 140px;
         }
         #textInput, #sendText { font-size: 16px; }
@@ -1339,36 +1352,38 @@ HTML_PAGE = """
             </div>
         </div>
     </div>
-    <div id="clickRow">
-        <button id="leftClickBtn">Left Click</button>
-        <button id="rightClickBtn">Right Click</button>
-        <button id="doubleClickBtn">Double Click</button>
-    </div>
-    <div id="textRow">
-        <div id="textInputWrap">
-            <textarea id="textInput" placeholder="Type here, then Send"></textarea>
-            <button id="clearTextBtn" type="button" aria-label="Clear text">&times;</button>
-        </div>
-        <button id="sendText">Send</button>
-    </div>
-    <div id="bottomBar">
-        <div id="controls">
-            <button data-key="enter">Enter</button>
-            <button data-key="backspace">Backspace</button>
-            <button data-key="tab">Tab</button>
-            <button data-key="escape">Esc</button>
-            <div id="arrowGroup">
-                <button class="arrow-pgup small" data-key="pageup">PgUp</button>
-                <button class="arrow-up" data-key="up">&uarr;</button>
-                <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
-                <button class="arrow-left" data-key="left">&larr;</button>
-                <button class="arrow-down" data-key="down">&darr;</button>
-                <button class="arrow-right" data-key="right">&rarr;</button>
+    <div id="inputPanel">
+        <div id="inputRows">
+            <div id="clickRow">
+                <button id="leftClickBtn">Left Click</button>
+                <button id="rightClickBtn">Right Click</button>
+                <button id="doubleClickBtn">Double Click</button>
             </div>
-            <button data-key="cmd+c">Cmd+C</button>
-            <button data-key="cmd+v">Cmd+V</button>
-            <button data-key="cmd+z">Cmd+Z</button>
-            <button data-key="cmd+tab">Cmd+Tab</button>
+            <div id="textRow">
+                <div id="textInputWrap">
+                    <textarea id="textInput" placeholder="Type here, then Send"></textarea>
+                    <button id="clearTextBtn" type="button" aria-label="Clear text">&times;</button>
+                </div>
+                <button id="sendText">Send</button>
+            </div>
+            <div id="controls">
+                <button data-key="enter">Enter</button>
+                <button data-key="backspace">Backspace</button>
+                <button data-key="tab">Tab</button>
+                <button data-key="escape">Esc</button>
+                <div id="arrowGroup">
+                    <button class="arrow-pgup small" data-key="pageup">PgUp</button>
+                    <button class="arrow-up" data-key="up">&uarr;</button>
+                    <button class="arrow-pgdn small" data-key="pagedown">PgDn</button>
+                    <button class="arrow-left" data-key="left">&larr;</button>
+                    <button class="arrow-down" data-key="down">&darr;</button>
+                    <button class="arrow-right" data-key="right">&rarr;</button>
+                </div>
+                <button data-key="cmd+c">Cmd+C</button>
+                <button data-key="cmd+v">Cmd+V</button>
+                <button data-key="cmd+z">Cmd+Z</button>
+                <button data-key="cmd+tab">Cmd+Tab</button>
+            </div>
         </div>
         <div id="scrollWheel" aria-label="Scroll">
             <span aria-hidden="true">&uarr;</span>
