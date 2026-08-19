@@ -734,11 +734,23 @@ def do_doubleclick(button):
                 time.sleep(0.05)
 
 
+def _post_scroll_event(vertical, horizontal):
+    event = Quartz.CGEventCreateScrollWheelEvent(
+        None, Quartz.kCGScrollEventUnitPixel, 2, vertical, horizontal
+    )
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+
 def do_scroll(dx, dy):
-    if dy:
-        pag(pyautogui.scroll, -dy)
-    if dx:
-        pag(pyautogui.hscroll, dx)
+    # pyautogui.scroll()/hscroll() post kCGScrollEventUnitLine events on
+    # macOS, which Chromium/Electron apps (VS Code, Chrome itself) largely
+    # ignore — confirmed by screenshot-diffing an actual VS Code pane: line
+    # units produced a ~0.1% pixel change (noise), pixel units at the same
+    # magnitude produced a real, visible scroll. Native apps handle line
+    # units fine, but pixel units work everywhere, so bypass pyautogui here
+    # entirely, same as _post_unicode_char above does for text.
+    if dx or dy:
+        pag(_post_scroll_event, -dy, dx)
 
 
 def _post_unicode_char(char):
@@ -1475,6 +1487,14 @@ HTML_PAGE = """
         let mousePointerId = null;
         const activePointers = new Map(); // pointerId -> {x, y} in client coords
 
+        // Last position (Mac screenshot-pixel space) a tap/drag on the video
+        // actually put the real cursor at — the scroll wheel widget (which
+        // has no on-screen position of its own) targets this, since a real
+        // desktop is commonly tiled with several windows and blindly
+        // recentering to the middle of the screen can easily land right on
+        // a seam between windows instead of inside the one you tapped.
+        let lastKnownMacPos = null;
+
         // Raw pointermove fires far faster (60-120/sec on a touchscreen) than
         // it's useful to relay over the network — each send is a real
         // synchronous OS call on the Mac side, so an unthrottled flood queues
@@ -1824,6 +1844,7 @@ HTML_PAGE = """
                 const off = offsetPoint(e.clientX, e.clientY);
                 updateCursorDot(off.x, off.y);
                 const { x, y } = toMacCoords(off.x, off.y);
+                lastKnownMacPos = { x, y };
                 sendInput('mousemove', { x, y }); // instant on first touch, not throttled
             } else if (activePointers.size === 2) {
                 gestureMode = 'pinch';
@@ -1839,6 +1860,7 @@ HTML_PAGE = """
                 const off = offsetPoint(e.clientX, e.clientY);
                 updateCursorDot(off.x, off.y);
                 const { x, y } = toMacCoords(off.x, off.y);
+                lastKnownMacPos = { x, y };
                 sendMouseMoveThrottled(x, y);
             } else if (gestureMode === 'pinch' && activePointers.size === 2) {
                 updatePinch();
@@ -1899,15 +1921,20 @@ HTML_PAGE = """
             scrollWheel.classList.add('active');
             // Unlike a click/drag on the video, this widget has no on-screen
             // position of its own — pyautogui.scroll() always acts on
-            // whatever's currently under the Mac's real cursor, which (if
-            // you haven't tapped the video yet) could be left anywhere from
-            // a previous session. Recentering it here on every drag start
-            // makes the widget reliably scroll "the middle of what I'm
-            // looking at" instead of silently doing nothing useful.
-            const rect = img.getBoundingClientRect();
-            const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
-            sendInput('mousemove', toMacCoords(cx, cy));
-            updateCursorDot(cx, cy);
+            // whatever's currently under the Mac's real cursor. If you've
+            // already tapped the video, the cursor is already sitting right
+            // where you want to scroll (lastKnownMacPos) — leave it alone.
+            // A real desktop is commonly tiled with several windows, so
+            // blindly recentering here on every drag would land on a seam
+            // between windows just as often as inside the one you tapped.
+            // Only fall back to the middle of the view if nothing's been
+            // tapped yet this session.
+            if (!lastKnownMacPos) {
+                const rect = img.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+                sendInput('mousemove', toMacCoords(cx, cy));
+                updateCursorDot(cx, cy);
+            }
         });
         scrollWheel.addEventListener('pointermove', (e) => {
             if (e.pointerId !== scrollWheelPointerId) return;
