@@ -1211,8 +1211,15 @@ HTML_PAGE = """
         #scrollWheel {
             /* A vertical drag strip for touch scrolling, sitting right of
                #controls — mirrors what a real mouse wheel already does via
-               the wheel listener on #screenWrap below. */
-            flex: 0 0 40px; align-self: stretch; display: flex; flex-direction: column; align-items: center;
+               the wheel listener on #screenWrap below. Height is NOT
+               align-self:stretch — #inputRows can be genuinely taller than
+               its own content (it stretches to #inputPanel's grown height
+               so #textRow has room to grow into, see #textRow's own
+               comment below), so stretching this to match would make it
+               taller than the three rows actually render. Sized via JS
+               instead (syncScrollWheelHeight) to match #inputRows' real
+               content height. */
+            flex: 0 0 40px; display: flex; flex-direction: column; align-items: center;
             justify-content: space-between; background: #333; color: #888;
             border: 1px solid #555; border-radius: 6px; padding: 8px 0;
             touch-action: none; user-select: none; -webkit-user-select: none; cursor: ns-resize;
@@ -1444,6 +1451,25 @@ HTML_PAGE = """
         const statusEl = document.getElementById('status');
         const staleOverlay = document.getElementById('staleOverlay');
         const staleAgeEl = document.getElementById('staleAge');
+
+        // #inputRows stretches to fill #inputPanel's grown height (so
+        // #textRow has leftover viewport space to grow into, up to its own
+        // 140px cap) — but its actual CONTENT (clickRow/textRow/controls)
+        // doesn't always fill that full stretched box, e.g. on a tall
+        // narrow viewport where there's more leftover than #textRow's cap
+        // can use. #scrollWheel should match the three rows as actually
+        // rendered, not #inputRows' possibly-taller box, so its height is
+        // synced here instead of via CSS stretch.
+        function syncScrollWheelHeight() {
+            const rows = document.getElementById('inputRows');
+            const wheel = document.getElementById('scrollWheel');
+            const last = rows.lastElementChild;
+            if (!last) return;
+            const height = last.getBoundingClientRect().bottom - rows.getBoundingClientRect().top;
+            wheel.style.height = height + 'px';
+        }
+        syncScrollWheelHeight();
+        window.addEventListener('resize', syncScrollWheelHeight);
         // Left/Right Click buttons hold the actual mouse button down for as
         // long as they're pressed; moving a finger on the screen only ever
         // moves the pointer, never clicks. This is the whole fix for
