@@ -1143,6 +1143,10 @@ HTML_PAGE = """
             max-width: 100%; max-height: 100%; width: auto; height: auto;
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER; background: #000;
         }
+        /* Focus is purely functional here (see the keydown passthrough
+           listener) — a ring around the whole video would just be visual
+           noise. */
+        #screenWrap:focus { outline: none; }
         #zoomLayer { width: 100%; height: 100%; transform-origin: 0 0; will-change: transform; }
         #screen {
             width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none;
@@ -1308,6 +1312,30 @@ HTML_PAGE = """
         }
         #clearTextBtn:active { background: #555; }
         #sendText { padding: 12px 20px; }
+
+        /* Desktop mode (see enterDesktopMode in the script below): a real
+           mouse and a real keyboard make most of the touch-oriented UI
+           redundant — real buttons replace Left/Right/Double Click, real
+           typing/shortcuts replace the meta-key row, and the real scroll
+           wheel (already forwarded, see the 'wheel' listener below) replaces
+           the on-screen one. What's left is only what a browser can never
+           deliver itself: OS-level shortcuts like Cmd+Tab, which get eaten
+           by the OS before any webpage sees the keydown. Hiding the rest
+           hands that vertical space back to the video, and dropping the
+           851px width cap (originally sized for the widest real *phone*,
+           the unfolded Pixel Fold — see #topbar above) lets the whole UI
+           actually use a desktop browser window's width instead of sitting
+           narrow and centered in the middle of it. */
+        body.desktop-mode #clickRow,
+        body.desktop-mode #scrollWheel,
+        body.desktop-mode #arrowGroup,
+        body.desktop-mode #controls > button:not([data-key="cmd+tab"]) {
+            display: none;
+        }
+        body.desktop-mode #topbar,
+        body.desktop-mode #inputPanel {
+            max-width: none;
+        }
     </style>
 </head>
 <body>
@@ -1463,6 +1491,7 @@ HTML_PAGE = """
         function syncScrollWheelHeight() {
             const rows = document.getElementById('inputRows');
             const wheel = document.getElementById('scrollWheel');
+            if (wheel.offsetParent === null) return; // hidden (desktop mode) — nothing to size
             const last = rows.lastElementChild;
             if (!last) return;
             const height = last.getBoundingClientRect().bottom - rows.getBoundingClientRect().top;
@@ -1883,6 +1912,7 @@ HTML_PAGE = """
         }
 
         screenWrap.addEventListener('pointerdown', (e) => {
+            if (e.pointerType === 'mouse') return; // handled by the desktop-mode block below
             e.preventDefault();
             try { screenWrap.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
             activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1902,6 +1932,7 @@ HTML_PAGE = """
         });
 
         screenWrap.addEventListener('pointermove', (e) => {
+            if (e.pointerType === 'mouse') return; // handled by the desktop-mode block below
             if (!activePointers.has(e.pointerId)) return;
             activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -1917,6 +1948,7 @@ HTML_PAGE = """
         });
 
         function endPointer(e) {
+            if (e.pointerType === 'mouse') return; // handled by the desktop-mode block below
             const wasMouse = gestureMode === 'mouse' && e.pointerId === mousePointerId;
             activePointers.delete(e.pointerId);
 
@@ -1931,6 +1963,109 @@ HTML_PAGE = """
         }
         screenWrap.addEventListener('pointerup', endPointer);
         screenWrap.addEventListener('pointercancel', endPointer);
+
+        // ---- Desktop mode: a real mouse gets native absolute cursor
+        // tracking + real buttons instead of the touch-oriented offset-drag
+        // gesture above (built so a finger doesn't cover the cursor it's
+        // controlling — irrelevant with a mouse, which already shows
+        // exactly where it is). Activates permanently on the first genuine
+        // mouse-sourced pointer event; never reverts, since there's no
+        // realistic case where switching back mid-session would help, and
+        // a stray mouse event on a hybrid touchscreen laptop is a fine
+        // reason to switch to the nicer desktop experience.
+        let desktopMode = false;
+        function enterDesktopMode() {
+            if (desktopMode) return;
+            desktopMode = true;
+            document.body.classList.add('desktop-mode');
+            // The streamed frame already shows the Mac's own system cursor
+            // (it's baked into the screenshot), so the finger-avoidance
+            // arrow overlay is redundant and would just be a second,
+            // laggier cursor drawn on top.
+            cursorDot.style.display = 'none';
+            screenWrap.setAttribute('tabindex', '0');
+        }
+        window.addEventListener('pointermove', (e) => {
+            if (e.pointerType === 'mouse') enterDesktopMode();
+        }, { once: true, passive: true });
+
+        screenWrap.addEventListener('pointerdown', (e) => {
+            if (e.pointerType !== 'mouse') return;
+            enterDesktopMode();
+            e.preventDefault();
+            screenWrap.focus();
+            const { x, y } = toMacCoords(e.clientX, e.clientY);
+            lastKnownMacPos = { x, y };
+            sendMouseMoveThrottled(x, y);
+            const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+            // Flush first so the click lands exactly where the cursor was
+            // just moved to, not wherever the last throttled send left it.
+            flushMouseMove().then(() => sendInput('mousedown', { button }));
+        });
+        screenWrap.addEventListener('pointerup', (e) => {
+            if (e.pointerType !== 'mouse') return;
+            const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+            sendInput('mouseup', { button }).then(() => setTimeout(refreshScreen, 150));
+        });
+        screenWrap.addEventListener('pointermove', (e) => {
+            if (e.pointerType !== 'mouse') return;
+            enterDesktopMode();
+            const { x, y } = toMacCoords(e.clientX, e.clientY);
+            lastKnownMacPos = { x, y };
+            sendMouseMoveThrottled(x, y);
+        });
+        // No explicit 'doubleclick' RPC here (unlike the touch Double Click
+        // button, which needs one — see its own comment): a real mouse's
+        // two clicks are already correctly timed by the OS, so forwarding
+        // them as two ordinary mousedown/mouseup pairs lets the remote Mac
+        // recognize the double-click itself, same as it would for a real
+        // mouse plugged into it directly.
+
+        // ---- Desktop mode keyboard passthrough: forwards physical
+        // keystrokes directly instead of typing into the on-screen field.
+        // Scoped to screenWrap's own focus (via tabindex, set in
+        // enterDesktopMode above) so it never intercepts typing in the text
+        // field or Settings dropdowns — those keep working normally since
+        // they hold their own focus instead.
+        const PASSTHROUGH_SPECIAL_KEYS = {
+            Enter: 'enter', Backspace: 'backspace', Tab: 'tab', Escape: 'escape',
+            ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+            PageUp: 'pageup', PageDown: 'pagedown', Home: 'home', End: 'end',
+            Delete: 'delete', ' ': 'space',
+            F1: 'f1', F2: 'f2', F3: 'f3', F4: 'f4', F5: 'f5', F6: 'f6',
+            F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+        };
+        screenWrap.addEventListener('keydown', (e) => {
+            if (!desktopMode) return;
+            const special = PASSTHROUGH_SPECIAL_KEYS[e.key];
+            const hasCombo = e.metaKey || e.ctrlKey || e.altKey;
+
+            if (!special && !hasCombo && e.key.length === 1) {
+                // A plain printable character (Shift already reflected in
+                // e.key, e.g. "A" or "!") — send as text, the same
+                // Unicode-safe path typed messages use, not a synthetic
+                // modifier combo. Deliberately no refreshScreen() here —
+                // unlike a discrete button tap, a physical keyboard can
+                // fire many of these a second, and forcing a WS reconnect
+                // per keystroke (what refreshScreen does) would fight the
+                // stream instead of helping it; the next frame arrives on
+                // its own soon enough.
+                e.preventDefault();
+                sendInput('text', { text: e.key });
+                return;
+            }
+
+            const base = special || (e.key.length === 1 ? e.key.toLowerCase() : null);
+            if (!base) return; // a bare modifier key (Shift/Control/...) alone — nothing to send yet
+            e.preventDefault();
+            const parts = [];
+            if (e.metaKey) parts.push('cmd');
+            if (e.ctrlKey) parts.push('ctrl');
+            if (e.altKey) parts.push('alt');
+            if (e.shiftKey && (special || hasCombo)) parts.push('shift');
+            parts.push(base);
+            sendInput('key', { key: parts.join('+') });
+        });
 
         screenWrap.addEventListener('wheel', (e) => {
             e.preventDefault();
