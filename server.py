@@ -1044,6 +1044,14 @@ HTML_PAGE = """
     <meta name="apple-mobile-web-app-title" content="APP_SHORT_TITLE_PLACEHOLDER">
     <style>
         * { box-sizing: border-box; }
+        /* Blocks the browser's own pull-to-refresh/rubber-band overscroll
+           navigation gesture everywhere on the page — without this, a drag
+           that starts just outside #scrollWheel (or any other
+           touch-action:none element) hits plain page background instead,
+           which the browser reads as a normal scroll gesture and, once it
+           overscrolls past the top, triggers a native reload. html needs
+           it too, not just body — Chrome/Android reads it from the root. */
+        html, body { overscroll-behavior: none; }
         body {
             margin: 0; background: #111; color: #eee; font-family: -apple-system, sans-serif;
             display: flex; flex-direction: column; height: 100dvh;
