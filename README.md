@@ -15,6 +15,8 @@ Currently **LAN-only by design** — there's no internet-facing tunnel. Remote a
 
 ## Setup
 
+Setting up on a new Mac (clone, venv, deps, autostart, and optionally the remote-access tunnel, all in one go)? `scripts/bootstrap-new-mac.sh` wraps everything below — see "Setting up a new Mac in one step" further down. The manual steps in this section are what it's actually running under the hood, and are still the way to go for just trying the server out locally first.
+
 macOS requires two permissions for the process running this script (Terminal, iTerm, or `python3` itself — whichever you launch it from):
 
 - **Accessibility** — lets `pyautogui` send synthetic clicks/keystrokes.
@@ -71,6 +73,18 @@ Prerequisites this doesn't set up for you:
 - The reverse proxy's config pointed at the tunnel's local port (see above).
 
 One portability gotcha worth knowing about: on at least one Mac, `/usr/local/bin/ssh` silently shadowed the real `ssh` with a corp SSH wrapper that accepted the `-R` forwarding request but never actually relayed any data — no error, just a tunnel that looks up but doesn't work. `setup-tunnel.sh` sidesteps this by pointing `autossh` at `/usr/bin/ssh` explicitly via `AUTOSSH_PATH`. If a tunnel ever "looks connected" but requests through it hang, check what `ssh` actually resolves to (`type -a ssh`) before assuming the network path itself is broken.
+
+## Setting up a new Mac in one step
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tomayac/poor-persons-kvm/main/scripts/bootstrap-new-mac.sh -o bootstrap.sh
+chmod +x bootstrap.sh
+./bootstrap.sh
+```
+
+Clones the repo (or pulls if it's already there), sets up the venv and dependencies, generates a fresh `KVM_TOKEN` if one isn't already set in the environment, and installs the autostart LaunchAgent — then asks whether to also set up the remote-access tunnel, generating a dedicated SSH key per machine (`REMOTE_TUNNEL_PORT` defaults to `25959` rather than the `15959` used above, so it doesn't collide with an existing tunnel on the same remote host out of the box).
+
+Everything's overridable via the same environment variables the individual scripts above take (`INSTALL_DIR`, `KVM_TOKEN`, `SSH_KEY`, `REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_USER`, `REMOTE_TUNNEL_PORT`, plus `SETUP_TUNNEL=yes`/`no` to skip the prompt). What it can't do for you: granting the Accessibility/Screen Recording permissions (a one-time macOS dialog, see above), adding the generated tunnel key to the remote host's `authorized_keys` (it prints the public key and waits), and pointing the reverse proxy at the new tunnel port on the remote side.
 
 ## Installing as an app
 
