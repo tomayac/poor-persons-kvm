@@ -1188,7 +1188,7 @@ HTML_PAGE = """
             /* A vertical drag strip for touch scrolling, sitting right of
                #controls — mirrors what a real mouse wheel already does via
                the wheel listener on #screenWrap below. */
-            flex: 0 0 40px; display: flex; flex-direction: column; align-items: center;
+            flex: 0 0 40px; align-self: stretch; display: flex; flex-direction: column; align-items: center;
             justify-content: space-between; background: #333; color: #888;
             border: 1px solid #555; border-radius: 6px; padding: 8px 0;
             touch-action: none; user-select: none; -webkit-user-select: none; cursor: ns-resize;
