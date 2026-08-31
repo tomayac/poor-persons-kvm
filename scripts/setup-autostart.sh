@@ -75,7 +75,8 @@ EOF
 cat > "$SUPPORT_DIR/check_and_launch.sh" <<EOF
 #!/bin/zsh
 # Invoked by the LaunchAgent at login and every 60s after — a no-op if the
-# server's already up, otherwise (cold start or crash) relaunches it via
+# server's already up AND actually responding, otherwise (cold start,
+# crash, or a hang that still holds the port open) relaunches it via
 # iTerm. This indirection through iTerm is what lets the server inherit
 # already-granted permissions instead of needing its own grant tied to a
 # Homebrew path (see setup-autostart.sh for the full explanation).
@@ -89,7 +90,15 @@ if [ -f "\$LOG" ] && [ "\$(stat -f%z "\$LOG" 2>/dev/null || echo 0)" -gt "\$MAX_
 fi
 
 if lsof -i :5959 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    exit 0
+    # Something's listening — but a hung process (a macOS screen-capture
+    # API deadlock, etc.) can hold the port open for days without ever
+    # answering a request, and a plain "is the port open" check can't
+    # tell the difference from a healthy server. A real request can.
+    if curl -s -o /dev/null -m 5 "http://127.0.0.1:5959/health?token=$KVM_TOKEN"; then
+        exit 0
+    fi
+    lsof -i :5959 -sTCP:LISTEN -t | xargs kill -9 2>/dev/null
+    sleep 1
 fi
 osascript "$SUPPORT_DIR/launch_in_iterm.applescript"
 EOF
