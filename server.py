@@ -835,10 +835,72 @@ def dispatch_input(data):
             do_key(combo)
 
 
+# Keystrokes and clicks are delivered at least once: the client numbers each
+# one (`seq`, per page load identified by `cid`), keeps it until it's acked,
+# and resends everything unacked whenever a connection is (re)established.
+# On a bad connection a socket can die with messages still buffered in it,
+# and before this those were simply gone ("hello world" arriving as
+# "hell wrld"). This map is what turns at-least-once into exactly-once:
+# anything at or below a client's last applied `seq` is a resend and is
+# skipped. Checking, dispatching, and recording all happen under one lock,
+# so an old socket still draining its buffer and the new socket's resends
+# can't apply the same event twice or apply two events out of order.
+_applied_seq = {}
+_applied_seq_lock = threading.Lock()
+_APPLIED_SEQ_MAX_CLIENTS = 200
+
+
+class InputGap(Exception):
+    """An event arrived ahead of one this client hasn't delivered yet."""
+
+
+def deliver_input(data):
+    """Dispatch one input event, skipping resends. Returns the `seq` to ack,
+    or None for events sent without one (mousemove, scroll).
+
+    Raises InputGap, without applying or acking anything, if an earlier
+    event is still missing. Acks are cumulative on the client, so acking
+    past a gap would silently drop the missing event; holding back makes
+    the client time out and resend from the missing one onward.
+    """
+    cid, seq = data.get("cid"), data.get("seq")
+    if not isinstance(cid, str) or not isinstance(seq, int):
+        dispatch_input(data)
+        return None
+    with _applied_seq_lock:
+        last = _applied_seq.get(cid)
+        # An unknown client (first contact, or this server restarted since)
+        # starts wherever it is: nothing to compare against.
+        if last is not None and seq > last + 1:
+            raise InputGap(f"{cid}: got {seq}, expected {last + 1}")
+        if last is None or seq == last + 1:
+            try:
+                dispatch_input(data)
+            except Exception as e:
+                # Still recorded as applied below: resending an event that
+                # fails deterministically (a bad key name) can't fix it.
+                print(f"input {data.get('type')} failed: {e!r}", flush=True)
+            # pop() + set moves `cid` to the end, so the trim below always
+            # drops the least recently active client.
+            _applied_seq.pop(cid, None)
+            _applied_seq[cid] = seq
+            while len(_applied_seq) > _APPLIED_SEQ_MAX_CLIENTS:
+                _applied_seq.pop(next(iter(_applied_seq)))
+    return seq
+
+
+def deliver_input_http(data):
+    try:
+        deliver_input(data)
+    except InputGap:
+        # 503 is retryable for the client's input queue, which then sends
+        # the missing event first.
+        abort(503)
+
+
 @app.route("/input/mousedown", methods=["POST"])
 def mousedown():
-    data = request.json or {}
-    do_mousedown(data.get("button", "left"), data.get("x"), data.get("y"))
+    deliver_input_http(dict(request.json or {}, type="mousedown"))
     return jsonify({"status": "ok"})
 
 
@@ -854,15 +916,13 @@ def mousemove():
 
 @app.route("/input/mouseup", methods=["POST"])
 def mouseup():
-    data = request.json or {}
-    do_mouseup(data.get("button", "left"))
+    deliver_input_http(dict(request.json or {}, type="mouseup"))
     return jsonify({"status": "ok"})
 
 
 @app.route("/input/doubleclick", methods=["POST"])
 def doubleclick():
-    data = request.json or {}
-    do_doubleclick(data.get("button", "left"))
+    deliver_input_http(dict(request.json or {}, type="doubleclick"))
     return jsonify({"status": "ok"})
 
 
@@ -875,8 +935,7 @@ def scroll():
 
 @app.route("/input/text", methods=["POST"])
 def type_text():
-    data = request.json or {}
-    do_text(data.get("text", ""))
+    deliver_input_http(dict(request.json or {}, type="text"))
     return jsonify({"status": "ok"})
 
 
@@ -886,10 +945,7 @@ def key_press():
     combo = data.get("key", "")
     if not combo:
         abort(400)
-    try:
-        do_key(combo)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    deliver_input_http(dict(data, type="key"))
     return jsonify({"status": "ok"})
 
 
@@ -1019,7 +1075,10 @@ def ws_handler(ws):
                     # thread that made the race possible in the first place,
                     # at the cost of reintroducing the original (purely
                     # cosmetic) false-staleness flash for a long message.
-                    dispatch_input(data)
+                    seq = deliver_input(data)
+                    if seq is not None:
+                        with send_lock:
+                            ws.send(json.dumps({"type": "input_ack", "seq": seq}))
             except Exception:
                 pass  # malformed/failed message — drop it, keep the connection alive
     finally:
@@ -1678,12 +1737,112 @@ HTML_PAGE = """
         let wsReconnectDelay = 1000; // ms — doubles on each failed attempt, capped below
         const WS_RECONNECT_MAX_DELAY_MS = 15000;
 
+        // Keystrokes and clicks are delivered at least once (see
+        // deliver_input() server-side, which skips resends): each one gets
+        // a `seq` and stays in `pendingInputs` until the server acks it, and
+        // a new connection resends everything still pending. ws.send() only
+        // hands data to the browser's buffer, so on a bad connection a
+        // socket can die with keystrokes still in it, and those used to be
+        // lost for good. mousemove and scroll stay fire-and-forget: they're
+        // high-volume, and replaying stale ones late would do more harm than
+        // dropping them.
+        const RELIABLE_INPUT_TYPES = new Set(['text', 'key', 'mousedown', 'mouseup', 'doubleclick']);
+        // crypto.getRandomValues() over crypto.randomUUID(): the latter
+        // needs a secure context, and the plain-HTTP LAN URL isn't one.
+        const inputClientId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+            (b) => b.toString(16).padStart(2, '0')).join('');
+        let inputSeq = 0;
+        const pendingInputs = []; // { seq, type, body, sentAt (0 = not yet sent on this socket), resolve }
+        let httpInputInFlight = false;
+        // A socket can stay OPEN for minutes after the link underneath it
+        // has died. If the oldest pending input isn't acked within this
+        // long (plus typing time for any text queued ahead of it, since the
+        // server acks only once an input has actually been applied), the
+        // socket is treated as dead and replaced, which resends everything.
+        const INPUT_ACK_TIMEOUT_MS = 5000;
+        const INPUT_ACK_MS_PER_CHAR = 20;
+
         function sendInput(type, body) {
-            if (transportMode === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(Object.assign({ type }, body)));
-                return Promise.resolve();
+            if (!RELIABLE_INPUT_TYPES.has(type)) {
+                if (transportMode === 'ws' && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(Object.assign({ type }, body)));
+                    return Promise.resolve();
+                }
+                return post('/input/' + type, body);
             }
-            return post('/input/' + type, body);
+            // Resolves once the server has applied it, so callers'
+            // .then(refreshAfterInput) and the text field's clearing both
+            // wait for real delivery.
+            return new Promise((resolve) => {
+                pendingInputs.push({ seq: ++inputSeq, type, body, sentAt: 0, resolve });
+                flushInputs();
+            });
+        }
+
+        function inputPayload(item) {
+            return Object.assign({}, item.body, { cid: inputClientId, seq: item.seq });
+        }
+
+        function ackInputs(seq) {
+            while (pendingInputs.length && pendingInputs[0].seq <= seq) {
+                pendingInputs.shift().resolve();
+            }
+        }
+
+        function flushInputs() {
+            if (transportMode === 'ws') {
+                // Not open yet: onopen flushes once it is.
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                for (const item of pendingInputs) {
+                    if (item.sentAt) continue;
+                    ws.send(JSON.stringify(Object.assign({ type: item.type }, inputPayload(item))));
+                    item.sentAt = Date.now();
+                }
+                return;
+            }
+            // Polling: one request at a time, in order. Parallel POSTs would
+            // be handled on parallel server threads and could apply out of
+            // order.
+            if (httpInputInFlight || !pendingInputs.length) return;
+            const item = pendingInputs[0];
+            httpInputInFlight = true;
+            post('/input/' + item.type, inputPayload(item)).then((r) => {
+                // 5xx is a proxy that couldn't reach the server (or a crash)
+                // and is worth retrying. Anything else is final: 200 means
+                // applied, and a 4xx won't succeed on a retry either.
+                if (r.status >= 500) throw new Error('HTTP ' + r.status);
+                ackInputs(item.seq);
+                httpInputInFlight = false;
+                flushInputs();
+            }).catch(() => {
+                setTimeout(() => {
+                    httpInputInFlight = false;
+                    flushInputs();
+                }, 1000);
+            });
+        }
+
+        setInterval(() => {
+            if (transportMode !== 'ws' || !ws || ws.readyState !== WebSocket.OPEN) return;
+            const oldest = pendingInputs[0];
+            if (!oldest || !oldest.sentAt) return;
+            let timeout = INPUT_ACK_TIMEOUT_MS;
+            for (const item of pendingInputs) {
+                if (item.type === 'text') timeout += item.body.text.length * INPUT_ACK_MS_PER_CHAR;
+            }
+            if (Date.now() - oldest.sentAt > timeout) {
+                disconnectWS();
+                connectWS();
+            }
+        }, 1000);
+
+        // What used to run refreshScreen() after every click and key
+        // button. In WS mode frames already stream on their own, and
+        // refreshScreen()'s forced reconnect there threw away the socket
+        // right after each input, which on a bad connection was itself a
+        // way to lose whatever was still buffered in it.
+        function refreshAfterInput() {
+            if (transportMode !== 'ws') fetchScreenshotOnce();
         }
 
         // 'natural': dx/dy forwarded as-is (content follows the drag/wheel
@@ -1724,7 +1883,14 @@ HTML_PAGE = """
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + TOKEN + '&rate=' + rateMode + '&resolution=' + resolutionMode);
             ws.binaryType = 'blob';
-            ws.onopen = () => { wsReconnectDelay = 1000; };
+            ws.onopen = () => {
+                wsReconnectDelay = 1000;
+                // Anything sent on an earlier socket may have died with it,
+                // so resend all of it; deliver_input() skips what already
+                // arrived.
+                for (const item of pendingInputs) item.sentAt = 0;
+                flushInputs();
+            };
             function sendFrameAck() {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'frame_ack' }));
@@ -1746,7 +1912,9 @@ HTML_PAGE = """
                 }
                 try {
                     const msg = JSON.parse(evt.data);
-                    if (msg.type === 'pong') {
+                    if (msg.type === 'input_ack') {
+                        ackInputs(msg.seq);
+                    } else if (msg.type === 'pong') {
                         markRTT(performance.now() - msg.t);
                     } else if (msg.type === 'unchanged') {
                         // Screen hasn't changed since the last frame — server
@@ -1763,6 +1931,10 @@ HTML_PAGE = """
                 ws = null;
                 if (transportMode === 'ws') scheduleWSReconnect();
             };
+            // A reconnect after an unexpected drop comes through here
+            // without disconnectWS(), which would otherwise leave the old
+            // socket's timer running alongside the new one.
+            if (wsPingTimer) clearInterval(wsPingTimer);
             wsPingTimer = setInterval(() => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'ping', t: performance.now() }));
@@ -2039,7 +2211,7 @@ HTML_PAGE = """
         screenWrap.addEventListener('pointerup', (e) => {
             if (e.pointerType !== 'mouse') return;
             const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
-            sendInput('mouseup', { button }).then(() => setTimeout(refreshScreen, 150));
+            sendInput('mouseup', { button }).then(() => setTimeout(refreshAfterInput, 150));
         });
         screenWrap.addEventListener('pointermove', (e) => {
             if (e.pointerType !== 'mouse') return;
@@ -2196,7 +2368,7 @@ HTML_PAGE = """
             function release() {
                 if (!(button === 'left' ? leftHeld : rightHeld)) return;
                 setHeld(false);
-                sendInput('mouseup', { button }).then(() => setTimeout(refreshScreen, 200));
+                sendInput('mouseup', { button }).then(() => setTimeout(refreshAfterInput, 200));
             }
             btn.addEventListener('pointerup', release);
             btn.addEventListener('pointercancel', release);
@@ -2204,7 +2376,7 @@ HTML_PAGE = """
         bindClickButton('leftClickBtn', 'left');
         bindClickButton('rightClickBtn', 'right');
         document.getElementById('doubleClickBtn').addEventListener('click', () => {
-            sendInput('doubleclick', { button: 'left' }).then(() => setTimeout(refreshScreen, 200));
+            sendInput('doubleclick', { button: 'left' }).then(() => setTimeout(refreshAfterInput, 200));
         });
 
         document.getElementById('resetZoom').addEventListener('click', resetZoom);
@@ -2232,6 +2404,10 @@ HTML_PAGE = """
                 disconnectWS();
                 startPollLoop();
             }
+            // Hands anything still pending to the new transport. Over WS
+            // that happens in onopen instead.
+            for (const item of pendingInputs) item.sentAt = 0;
+            flushInputs();
         });
 
         document.getElementById('rateMode').addEventListener('change', (e) => {
@@ -2297,7 +2473,7 @@ HTML_PAGE = """
             const ctrlVariant = key.startsWith('cmd+') ? 'ctrl+' + key.slice(4) : null;
 
             function sendKey(combo) {
-                sendInput('key', { key: combo }).then(() => setTimeout(refreshScreen, 150));
+                sendInput('key', { key: combo }).then(() => setTimeout(refreshAfterInput, 150));
             }
 
             if (!ctrlVariant) {
@@ -2363,7 +2539,7 @@ HTML_PAGE = """
             sendInput('text', { text: textInput.value }).then(() => {
                 textInput.value = '';
                 updateClearBtnVisibility();
-                setTimeout(refreshScreen, 150);
+                setTimeout(refreshAfterInput, 150);
             });
         });
 
