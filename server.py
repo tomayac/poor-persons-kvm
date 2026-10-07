@@ -1085,6 +1085,12 @@ HTML_PAGE = """
             flex: 0 1 auto; min-height: 0; display: flex;
             align-items: center; justify-content: center; overflow: hidden; background: #000;
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER;
+            /* Lets #screenWrap size itself against this box's actual
+               dimensions via cqw/cqh (see #screenWrap below). Size
+               containment also means this box never takes its size from the
+               image, which it doesn't need to: its width comes from the
+               body's stretch and its height from aspect-ratio or flex. */
+            container-type: size;
         }
         /* Same margin-block-end treatment as #clickRow/#textRow below, so the
            video-to-first-bar gap matches the gap between the bars
@@ -1139,8 +1145,16 @@ HTML_PAGE = """
                letterboxed image inside a larger fixed-size wrap, all of
                that math would need a separate "where's the actual image
                within the wrap" offset. Keeping wrap == image avoids that
-               entirely. */
-            max-width: 100%; max-height: 100%; width: auto; height: auto;
+               entirely.
+
+               The width is the largest one that fits #screenCenterer in
+               both directions at the screen's aspect ratio. It must not
+               depend on the <img>'s intrinsic size: with width:auto it
+               did, so switching the stream to a smaller resolution tier
+               shrank the whole box to the new frame's pixel size and left
+               black bars around it whenever #screenCenterer was bigger. */
+            width: min(100cqw, 100cqh * (SCREEN_ASPECT_PLACEHOLDER)); height: auto;
+            max-width: 100%; max-height: 100%;
             aspect-ratio: SCREEN_ASPECT_PLACEHOLDER; background: #000;
         }
         /* Focus is purely functional here (see the keydown passthrough
