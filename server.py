@@ -183,12 +183,23 @@ def resize_for_stream(img, max_dim):
     return img
 
 
-def scale_to_screen(x, y):
-    """Map a click's screenshot-pixel coordinates to pyautogui's logical points."""
-    if _last_screenshot_size is None:
+def scale_to_screen(x, y, frame_w=None, frame_h=None):
+    """Map a click's screenshot-pixel coordinates to pyautogui's logical points.
+
+    `frame_w`/`frame_h` are the size of the frame the client measured `x`/`y`
+    against. With auto resolution the stream changes tiers on its own, so the
+    frame on the client's screen can be a different size from the one
+    captured last, and scaling by `_last_screenshot_size` then sent clicks
+    toward the top-left. Clients that don't send a size still get the old
+    behavior.
+    """
+    if isinstance(frame_w, (int, float)) and isinstance(frame_h, (int, float)) and frame_w > 0 and frame_h > 0:
+        shot_w, shot_h = frame_w, frame_h
+    elif _last_screenshot_size is None:
         return x, y
+    else:
+        shot_w, shot_h = _last_screenshot_size
     screen_w, screen_h = pyautogui.size()
-    shot_w, shot_h = _last_screenshot_size
     if shot_w == screen_w and shot_h == screen_h:
         return x, y
     return x * screen_w / shot_w, y * screen_h / shot_h
@@ -683,12 +694,12 @@ def _post_mouse_event(event_type, pos, button_const, click_count):
 # "Polling" transport) and the /ws message loop (for "WebSocket" transport),
 # so the two transports can't drift in behavior.
 
-def do_mousedown(button, x=None, y=None):
+def do_mousedown(button, x=None, y=None, frame_w=None, frame_h=None):
     # x/y are optional: the Left/Right Click buttons press wherever the
     # cursor already is (positioned by prior mousemove calls) rather than
     # moving it.
     if x is not None and y is not None:
-        x, y = scale_to_screen(x, y)
+        x, y = scale_to_screen(x, y, frame_w, frame_h)
         pag(pyautogui.moveTo, x, y)
         pos = (x, y)
     else:
@@ -699,8 +710,8 @@ def do_mousedown(button, x=None, y=None):
     pag(_post_mouse_event, down_type, pos, btn_const, count)
 
 
-def do_mousemove(x, y):
-    x, y = scale_to_screen(x, y)
+def do_mousemove(x, y, frame_w=None, frame_h=None):
+    x, y = scale_to_screen(x, y, frame_w, frame_h)
     pag(pyautogui.moveTo, x, y)
 
 
@@ -816,11 +827,11 @@ def dispatch_input(data):
     """Run one input event dict (as sent over /ws) against the shared handlers."""
     kind = data.get("type")
     if kind == "mousedown":
-        do_mousedown(data.get("button", "left"), data.get("x"), data.get("y"))
+        do_mousedown(data.get("button", "left"), data.get("x"), data.get("y"), data.get("w"), data.get("h"))
     elif kind == "mousemove":
         x, y = data.get("x"), data.get("y")
         if x is not None and y is not None:
-            do_mousemove(x, y)
+            do_mousemove(x, y, data.get("w"), data.get("h"))
     elif kind == "mouseup":
         do_mouseup(data.get("button", "left"))
     elif kind == "doubleclick":
@@ -910,7 +921,7 @@ def mousemove():
     x, y = data.get("x"), data.get("y")
     if x is None or y is None:
         abort(400)
-    do_mousemove(x, y)
+    do_mousemove(x, y, data.get("w"), data.get("h"))
     return jsonify({"status": "ok"})
 
 
@@ -1675,15 +1686,15 @@ HTML_PAGE = """
         let pendingMove = null;
         let moveThrottleTimer = null;
 
-        function sendMouseMoveThrottled(x, y) {
-            pendingMove = { x, y };
+        function sendMouseMoveThrottled(pos) {
+            pendingMove = pos;
             if (moveThrottleTimer) return;
             moveThrottleTimer = setTimeout(() => {
                 moveThrottleTimer = null;
                 if (pendingMove) {
-                    const { x, y } = pendingMove;
+                    const pos = pendingMove;
                     pendingMove = null;
-                    sendInput('mousemove', { x, y });
+                    sendInput('mousemove', pos);
                 }
             }, MOUSEMOVE_INTERVAL);
         }
@@ -1694,9 +1705,9 @@ HTML_PAGE = """
                 moveThrottleTimer = null;
             }
             if (pendingMove) {
-                const { x, y } = pendingMove;
+                const pos = pendingMove;
                 pendingMove = null;
-                return sendInput('mousemove', { x, y });
+                return sendInput('mousemove', pos);
             }
             return Promise.resolve();
         }
@@ -2034,9 +2045,14 @@ HTML_PAGE = """
             const rect = img.getBoundingClientRect();
             const scaleX = img.naturalWidth / rect.width;
             const scaleY = img.naturalHeight / rect.height;
+            // `w`/`h` tell the server which frame size `x`/`y` are in: with
+            // auto resolution the frame on screen can be a different tier
+            // from the one the server captured last.
             return {
                 x: Math.round((clientX - rect.left) * scaleX),
                 y: Math.round((clientY - rect.top) * scaleY),
+                w: img.naturalWidth,
+                h: img.naturalHeight,
             };
         }
 
@@ -2128,9 +2144,9 @@ HTML_PAGE = """
                 mousePointerId = e.pointerId;
                 const off = offsetPoint(e.clientX, e.clientY);
                 updateCursorDot(off.x, off.y);
-                const { x, y } = toMacCoords(off.x, off.y);
-                lastKnownMacPos = { x, y };
-                sendInput('mousemove', { x, y }); // instant on first touch, not throttled
+                const pos = toMacCoords(off.x, off.y);
+                lastKnownMacPos = pos;
+                sendInput('mousemove', pos); // instant on first touch, not throttled
             } else if (activePointers.size === 2) {
                 gestureMode = 'pinch';
                 startPinch();
@@ -2145,9 +2161,9 @@ HTML_PAGE = """
             if (gestureMode === 'mouse' && e.pointerId === mousePointerId) {
                 const off = offsetPoint(e.clientX, e.clientY);
                 updateCursorDot(off.x, off.y);
-                const { x, y } = toMacCoords(off.x, off.y);
-                lastKnownMacPos = { x, y };
-                sendMouseMoveThrottled(x, y);
+                const pos = toMacCoords(off.x, off.y);
+                lastKnownMacPos = pos;
+                sendMouseMoveThrottled(pos);
             } else if (gestureMode === 'pinch' && activePointers.size === 2) {
                 updatePinch();
             }
@@ -2200,9 +2216,9 @@ HTML_PAGE = """
             enterDesktopMode();
             e.preventDefault();
             screenWrap.focus();
-            const { x, y } = toMacCoords(e.clientX, e.clientY);
-            lastKnownMacPos = { x, y };
-            sendMouseMoveThrottled(x, y);
+            const pos = toMacCoords(e.clientX, e.clientY);
+            lastKnownMacPos = pos;
+            sendMouseMoveThrottled(pos);
             const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
             // Flush first so the click lands exactly where the cursor was
             // just moved to, not wherever the last throttled send left it.
@@ -2216,9 +2232,9 @@ HTML_PAGE = """
         screenWrap.addEventListener('pointermove', (e) => {
             if (e.pointerType !== 'mouse') return;
             enterDesktopMode();
-            const { x, y } = toMacCoords(e.clientX, e.clientY);
-            lastKnownMacPos = { x, y };
-            sendMouseMoveThrottled(x, y);
+            const pos = toMacCoords(e.clientX, e.clientY);
+            lastKnownMacPos = pos;
+            sendMouseMoveThrottled(pos);
         });
         // No explicit 'doubleclick' RPC here (unlike the touch Double Click
         // button, which needs one — see its own comment): a real mouse's
