@@ -48,27 +48,55 @@ cat > "$SUPPORT_DIR/launch_detached.sh" <<EOF
 # Run by iTerm (via launch_in_iterm.applescript) so the server process is
 # created as iTerm's child and inherits its already-granted Screen
 # Recording + Accessibility permissions. Backgrounding + disown detaches it
-# from this shell immediately, so once this script exits (right away) and
-# iTerm auto-closes the now-empty window, the server keeps running as an
-# orphaned process — verified this doesn't affect its permissions, since
-# those are resolved once, not re-checked against live ancestry. No window
+# from this shell immediately, so once launch_in_iterm.applescript closes
+# this window, the server keeps running as an orphaned process — verified
+# this doesn't affect its permissions, since those are resolved once, not
+# re-checked against live ancestry. No window
 # stays open or hidden; nothing bounces in the Dock (server.py itself marks
 # its process as a background accessory app).
 cd "$PROJECT_DIR" || exit 1
 export KVM_TOKEN="$KVM_TOKEN"
 nohup ./venv/bin/python server.py >> "$LOG_DIR/poor-persons-kvm.log" 2>&1 &
 disown
+# Keeps this session alive until launch_in_iterm.applescript closes its
+# window. iTerm keeps a window open when its session ends very soon after
+# starting (so an error stays readable), which left a blank window behind
+# after every launch. The timeout only matters if the AppleScript never
+# gets to close the window; ending after a minute isn't "very soon".
+sleep 60
 EOF
 chmod +x "$SUPPORT_DIR/launch_detached.sh"
 
 cat > "$SUPPORT_DIR/launch_in_iterm.applescript" <<EOF
 -- Addressing "application iTerm" auto-launches it if it isn't already
 -- running, so this works the same whether iTerm is already open or this
--- is a cold boot. The window this opens closes itself automatically as
--- soon as launch_detached.sh exits (which it does almost immediately,
--- having backgrounded and disowned the actual server process).
+-- is a cold boot.
 tell application "iTerm"
-    create window with default profile command "/bin/zsh -l '$SUPPORT_DIR/launch_detached.sh'"
+    set launcherWindow to (create window with default profile command "/bin/zsh -l '$SUPPORT_DIR/launch_detached.sh'")
+end tell
+
+-- Close the window once the server is listening. launch_detached.sh
+-- waits for this instead of exiting right after starting the server,
+-- because iTerm keeps a window open when its session ends very soon after
+-- starting, and that left a blank window behind after every launch.
+-- Closing it while the shell still runs is safe: the server ignores
+-- SIGHUP (nohup), has no controlling terminal, and its parent is launchd.
+-- After 30s it's closed regardless, since the window shows nothing (all
+-- output goes to the log) and a failing server would otherwise pile up
+-- one window per retry.
+repeat 30 times
+    try
+        do shell script "lsof -i :5959 -sTCP:LISTEN -t"
+        exit repeat
+    end try
+    delay 1
+end repeat
+tell application "iTerm"
+    try
+        close launcherWindow
+    on error errMsg
+        log "Closing the launcher window failed: " & errMsg
+    end try
 end tell
 EOF
 
