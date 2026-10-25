@@ -8,14 +8,14 @@
 #   ./venv/bin/pip install -r requirements.txt   # if not done already
 #   KVM_TOKEN=your-token-here ./scripts/setup-autostart.sh
 #
-# Why this goes through iTerm instead of having launchd run Python
-# directly: launchd-spawned processes don't carry the Screen
-# Recording/Accessibility grants an interactive terminal app already has,
-# and granting them separately means targeting Homebrew's actual
-# interpreter binary — a path that moves every time python@3.14 gets
-# upgraded. Launching via iTerm (as its own child, backgrounded + disowned
-# immediately after) lets the server inherit iTerm's existing, stable
-# grants instead. See README.md's "Running at login" section for more.
+# Why launchd starts the server through a launcher app: macOS ties the Screen Recording/Accessibility grants of
+# a launchd-spawned process to Homebrew's actual interpreter binary, a
+# path that moves every time python@3.14 gets upgraded. A tiny AppleScript
+# applet, built once and granted both permissions once, starts the server
+# as its own child, so the server inherits the applet's stable grants.
+# The applet is a background-only app (LSUIElement) launched hidden with
+# `open -gj`, so no window or Dock icon ever shows up. See README.md's
+# "Running at login" section for more.
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -35,6 +35,7 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
 PLIST_LABEL="com.tomayac.poor-persons-kvm"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$PLIST_LABEL.plist"
+APP_PATH="$SUPPORT_DIR/Poor Persons KVM.app"
 
 if [[ ! -x "$PROJECT_DIR/venv/bin/python" ]]; then
     echo "No venv at $PROJECT_DIR/venv — run the Setup steps in README.md first." >&2
@@ -45,69 +46,48 @@ mkdir -p "$SUPPORT_DIR" "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
 
 cat > "$SUPPORT_DIR/launch_detached.sh" <<EOF
 #!/bin/zsh
-# Run by iTerm (via launch_in_iterm.applescript) so the server process is
-# created as iTerm's child and inherits its already-granted Screen
-# Recording + Accessibility permissions. Backgrounding + disown detaches it
-# from this shell immediately, so once launch_in_iterm.applescript closes
-# this window, the server keeps running as an orphaned process — verified
-# this doesn't affect its permissions, since those are resolved once, not
-# re-checked against live ancestry. No window
-# stays open or hidden; nothing bounces in the Dock (server.py itself marks
-# its process as a background accessory app).
+# Run by the launcher app so the server process is created as the app's
+# child and inherits its already-granted Screen Recording + Accessibility
+# permissions. Backgrounding + disown detaches it from this shell
+# immediately, so the app quits right away and the server keeps running
+# as an orphaned process. That doesn't affect its permissions, since macOS
+# resolves those once at launch. Every output
+# stream points away from the app's pipe, which \`do shell script\` would
+# otherwise wait on until the server exits.
 cd "$PROJECT_DIR" || exit 1
 export KVM_TOKEN="$KVM_TOKEN"
-nohup ./venv/bin/python server.py >> "$LOG_DIR/poor-persons-kvm.log" 2>&1 &
+nohup ./venv/bin/python server.py >> "$LOG_DIR/poor-persons-kvm.log" 2>&1 < /dev/null &
 disown
-# Keeps this session alive until launch_in_iterm.applescript closes its
-# window. iTerm keeps a window open when its session ends very soon after
-# starting (so an error stays readable), which left a blank window behind
-# after every launch. The timeout only matters if the AppleScript never
-# gets to close the window; ending after a minute isn't "very soon".
-sleep 60
 EOF
 chmod +x "$SUPPORT_DIR/launch_detached.sh"
 
-cat > "$SUPPORT_DIR/launch_in_iterm.applescript" <<EOF
--- Addressing "application iTerm" auto-launches it if it isn't already
--- running, so this works the same whether iTerm is already open or this
--- is a cold boot.
-tell application "iTerm"
-    set launcherWindow to (create window with default profile command "/bin/zsh -l '$SUPPORT_DIR/launch_detached.sh'")
-end tell
+# Left over from when the server was launched through an iTerm window.
+rm -f "$SUPPORT_DIR/launch_in_iterm.applescript"
 
--- Close the window once the server is listening. launch_detached.sh
--- waits for this instead of exiting right after starting the server,
--- because iTerm keeps a window open when its session ends very soon after
--- starting, and that left a blank window behind after every launch.
--- Closing it while the shell still runs is safe: the server ignores
--- SIGHUP (nohup), has no controlling terminal, and its parent is launchd.
--- After 30s it's closed regardless, since the window shows nothing (all
--- output goes to the log) and a failing server would otherwise pile up
--- one window per retry.
-repeat 30 times
-    try
-        do shell script "lsof -i :5959 -sTCP:LISTEN -t"
-        exit repeat
-    end try
-    delay 1
-end repeat
-tell application "iTerm"
-    try
-        close launcherWindow
-    on error errMsg
-        log "Closing the launcher window failed: " & errMsg
-    end try
-end tell
-EOF
+# Built only once: macOS ties the permission grants to the app's code
+# signature, so rebuilding it would silently revoke them. The app holds
+# nothing but the path to launch_detached.sh, so a new token doesn't need
+# a rebuild. Delete the app to force one, then grant it again.
+if [[ ! -d "$APP_PATH" ]]; then
+    osacompile -o "$APP_PATH" \
+        -e "do shell script \"/bin/zsh \" & quoted form of \"$SUPPORT_DIR/launch_detached.sh\""
+    # Background-only, so launching it never shows a Dock icon or menu bar.
+    /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$APP_PATH/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $PLIST_LABEL.launcher" "$APP_PATH/Contents/Info.plist" 2>/dev/null ||
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $PLIST_LABEL.launcher" "$APP_PATH/Contents/Info.plist"
+    # Editing Info.plist invalidated osacompile's signature, so re-sign it.
+    codesign --force --sign - "$APP_PATH"
+    NEW_APP=yes
+fi
 
 cat > "$SUPPORT_DIR/check_and_launch.sh" <<EOF
 #!/bin/zsh
 # Invoked by the LaunchAgent at login and every 60s after — a no-op if the
 # server's already up AND actually responding, otherwise (cold start,
-# crash, or a hang that still holds the port open) relaunches it via
-# iTerm. This indirection through iTerm is what lets the server inherit
-# already-granted permissions instead of needing its own grant tied to a
-# Homebrew path (see setup-autostart.sh for the full explanation).
+# crash, or a hang that still holds the port open) relaunches it via the
+# launcher app. This indirection lets the server inherit the app's
+# already-granted permissions, which stay put across Homebrew upgrades
+# (see setup-autostart.sh for the full explanation).
 
 # Keep the server's log from growing forever — trim it to its last ~5MB
 # whenever this runs, since nothing else rotates it.
@@ -128,7 +108,8 @@ if lsof -i :5959 -sTCP:LISTEN -t >/dev/null 2>&1; then
     lsof -i :5959 -sTCP:LISTEN -t | xargs kill -9 2>/dev/null
     sleep 1
 fi
-osascript "$SUPPORT_DIR/launch_in_iterm.applescript"
+# -g keeps it in the background, -j launches it hidden.
+open -gj "$APP_PATH"
 EOF
 chmod +x "$SUPPORT_DIR/check_and_launch.sh"
 
@@ -167,6 +148,12 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 echo "Installed and started. Logs:"
 echo "  $LOG_DIR/poor-persons-kvm.log"
 echo "  $LOG_DIR/poor-persons-kvm-launcher.log / .err.log"
-echo "Grant Screen Recording + Accessibility to iTerm (System Settings >"
-echo "Privacy & Security) if the server's screenshots/input don't work yet —"
-echo "that's the only manual step, and it's one-time."
+if [[ "${NEW_APP:-no}" == "yes" ]]; then
+    echo
+    echo "Built a new launcher app at:"
+    echo "  $APP_PATH"
+    echo "Grant it Screen Recording + Accessibility (System Settings >"
+    echo "Privacy & Security, add it with the + button), then restart the"
+    echo "server so it picks the grants up. That's the only manual step, and"
+    echo "it's one-time."
+fi

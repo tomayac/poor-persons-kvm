@@ -42,13 +42,6 @@ if ! xcode-select -p >/dev/null 2>&1; then
     exit 1
 fi
 
-if [[ ! -d "/Applications/iTerm.app" ]]; then
-    echo "Warning: iTerm.app wasn't found in /Applications." >&2
-    echo "The autostart LaunchAgent launches the server through iTerm" >&2
-    echo "specifically (see README.md) — install it from https://iterm2.com" >&2
-    echo "before the autostart step will actually work." >&2
-    echo
-fi
 
 # ---- 1. Clone or update the repo ----
 if [[ -d "$INSTALL_DIR/.git" ]]; then
@@ -131,10 +124,11 @@ echo "Once permissions are granted (see below), open:"
 echo "  http://$LOCAL_IP:5959/?token=$KVM_TOKEN"
 echo
 echo "Remaining manual steps:"
-echo "  1. The first time the server actually runs, macOS will prompt for"
-echo "     Accessibility + Screen Recording permissions — grant BOTH to"
-echo "     iTerm (System Settings > Privacy & Security). Until then,"
-echo "     /health returns 500 and the video/input won't work."
+echo "  1. Grant BOTH Accessibility + Screen Recording to the launcher app"
+echo "     ~/Library/Application Support/poor-persons-kvm/Poor Persons KVM.app"
+echo "     (System Settings > Privacy & Security, + button), then restart"
+echo "     the server. Until then, /health returns 500 and the"
+echo "     video/input won't work."
 if [[ "${SETUP_TUNNEL:-no}" == "yes" ]]; then
 echo "  2. On the Home Assistant side, add an nginx server block (or"
 echo "     equivalent) proxying a hostname of your choice to"
